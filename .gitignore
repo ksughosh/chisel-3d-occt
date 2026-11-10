@@ -1,0 +1,12 @@
+build/
+*.o
+*.so
+*.dylib
+*.a
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.user
+.vscode/
+.idea/
