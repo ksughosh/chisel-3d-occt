@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: LGPL-2.1-only
 # KERN-0 host-side smoke for libchisel_occt.so: LOAD align, NEEDED has no libTK*, only the two factory symbols exported, size.
-# Usage: tools/occt/check_occt_lib.sh [path/to/libchisel_occt.so] [max_bytes]   (default max 10.5 MB; measured on the stripped file)
+# Usage: tools/occt/check_occt_lib.sh [path/to/libchisel_occt.so] [max_bytes]   (default max 13,631,488 B = KERN-5 budget, measured on the stripped file)
 set -euo pipefail
-SO="${1:-build/kern0-android/occt/libchisel_occt.so}"; MAX="${2:-11010048}"
+SO="${1:-build/kern0-android/occt/libchisel_occt.so}"; MAX="${2:-13631488}"   # KERN-5 (U35/ADR-027): measured 13,158,720 B (chamfer + draft, bend/STEP declared only) + 3.6 % headroom; user ceiling about 13.2 MB for the linked ops
 SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"; NB="$SDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin"
 T="$(mktemp -d)"; "$NB/llvm-strip" --strip-all -o "$T/s.so" "$SO"; fail=0
 size=$(stat -f%z "$T/s.so"); echo "stripped size: $size B"; [[ $size -le $MAX ]] || { echo "FAIL size > $MAX"; fail=1; }

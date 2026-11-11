@@ -13,3 +13,7 @@ tools/occt/README.md
 tools/occt/check_occt_lib.sh
 LICENSES/LGPL-2.1.txt
 LICENSES/OCCT-LGPL-exception-1.0.txt
+native/core/src/kernel/occt_bevel_guard.h
+native/core/src/kernel/occt_bevel_guard.cpp
+native/core/src/kernel/occt_chamfer.cpp
+native/core/src/kernel/occt_draft.cpp

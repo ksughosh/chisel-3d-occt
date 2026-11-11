@@ -8,6 +8,6 @@
 #include <cstdint>
 
 namespace chisel {
-constexpr int kChiselOcctAbi = 1;
-constexpr uint64_t kPublicHeadersFnv1a64 = 0xcf75d375c7c488a6ull;
+constexpr int kChiselOcctAbi = 2;   // 2: KERN-5 chamfer + draft AND the bend / STEP declarations in one public-header change (ADR-027, G3 5.3, G4 8.1c)
+constexpr uint64_t kPublicHeadersFnv1a64 = 0x80accc46c1a433dfull;
 }  // namespace chisel

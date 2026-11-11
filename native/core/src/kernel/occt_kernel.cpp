@@ -15,6 +15,13 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepGProp_Face.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepTools_History.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <Geom2d_Curve.hxx>
+#include <set>
 #include <Bnd_Box.hxx>
 #include <Standard_Failure.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -50,12 +57,13 @@
 #include <gp_Vec.hxx>
 
 #include "chisel/kernel/geometry_kernel.h"
+#include "occt_bevel_guard.h"
 
 namespace chisel {
 using V3 = glm::dvec3; using V2 = glm::dvec2;
 
 namespace {
-struct Body { TopoDS_Shape shape; NameMap names; TopTools_IndexedMapOfShape faces; };
+struct Body { TopoDS_Shape shape; NameMap names; TopTools_IndexedMapOfShape faces, edges; };
 
 gp_Pnt P(const PlaneFrame& f, V2 p) { V3 w = f.origin + f.xAxis * p.x + f.yAxis * p.y; return gp_Pnt(w.x, w.y, w.z); }
 gp_Dir D(V3 v) { v = glm::normalize(v); return gp_Dir(v.x, v.y, v.z); }
@@ -63,7 +71,7 @@ gp_Dir D(V3 v) { v = glm::normalize(v); return gp_Dir(v.x, v.y, v.z); }
 class OcctKernel : public IGeometryKernel {
  public:
   const char* name() const override { return "occt-8.0.1"; }
-  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
+  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
 
   struct Built { TopoDS_Face face; std::vector<std::pair<TopoDS_Edge, Uid>> edges; bool ok = false; std::string err; };
 
@@ -119,7 +127,8 @@ class OcctKernel : public IGeometryKernel {
     KernelResult r;
     (void)feature;
     Body b; b.shape = solid; b.names = std::move(names);
-    TopExp::MapShapes(solid, TopAbs_FACE, b.faces);
+    TopExp::MapShapes(solid, TopAbs_FACE, b.faces); TopExp::MapShapes(solid, TopAbs_EDGE, b.edges);
+    b.names.edges = bevel::edgeNamesOf(b.faces, b.edges, b.names.faces);   // KERN-5: derived from the face names (adjacent pair + rank by midpoint), parallel to b.edges
     std::lock_guard<std::mutex> lk(m_);
     r.ok = true; r.body.id = ++next_; r.names = b.names; bodies_.emplace(r.body.id, std::move(b));
     return r;
@@ -368,6 +377,22 @@ class OcctKernel : public IGeometryKernel {
     try { return copyBodyImpl(h, feature); }
     catch (const Standard_Failure&) { return fail("The copy failed.", "Try again."); }
     catch (...) { return fail("The copy failed.", "Try again."); }
+  }
+  // KERN-5 (ADR-027): chamfer and draft live in occt_chamfer.cpp / occt_draft.cpp; this adapter only registers the result body.
+  KernelResult bevelResult(BodyHandle h, bool isChamfer, const ChamferSpec* cs, const DraftSpec* ds, Uid feature) {
+    bevel::Input in;
+    { std::lock_guard<std::mutex> lk(m_); auto it = bodies_.find(h.id); if (it == bodies_.end()) return fail("Reference lost: body.", "Pick the body again.");
+      in.shape = it->second.shape; in.faces = it->second.faces; in.edges = it->second.edges; in.faceNames = it->second.names.faces; in.edgeNames = it->second.names.edges; }
+    bevel::Out o = isChamfer ? bevel::chamfer(in, *cs, feature) : bevel::draft(in, *ds, feature);
+    if (!o.ok) return fail(o.error, o.fix);
+    NameMap names; names.faces = std::move(o.faceNames);
+    return finishBody(o.shape, std::move(names), feature);
+  }
+  KernelResult chamferEdges(BodyHandle h, const ChamferSpec& s, Uid feature) override {
+    try { return bevelResult(h, true, &s, nullptr, feature); } catch (...) { return fail("The chamfer could not be made on this edge.", "Try a smaller distance or fewer edges."); }
+  }
+  KernelResult draftFaces(BodyHandle h, const DraftSpec& s, Uid feature) override {
+    try { return bevelResult(h, false, nullptr, &s, feature); } catch (...) { return fail("The taper could not be made.", "Try a smaller angle."); }
   }
   std::optional<Aabb> bounds(BodyHandle h) override {
     try { return boundsImpl(h); } catch (const Standard_Failure&) { return std::nullopt; } catch (...) { return std::nullopt; }
