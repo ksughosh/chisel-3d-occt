@@ -71,7 +71,7 @@ gp_Dir D(V3 v) { v = glm::normalize(v); return gp_Dir(v.x, v.y, v.z); }
 class OcctKernel : public IGeometryKernel {
  public:
   const char* name() const override { return "occt-8.0.1"; }
-  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
+  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
 
   struct Built { TopoDS_Face face; std::vector<std::pair<TopoDS_Edge, Uid>> edges; bool ok = false; std::string err; };
 
@@ -152,8 +152,8 @@ class OcctKernel : public IGeometryKernel {
     if (std::abs(s.distanceMm) < 1e-12) return fail("Distance is 0.", "Enter a non-zero distance.");
     Built b = buildFace(pr); if (!b.ok) return fail(b.err, "Check the sketch profile.");
     V3 n = pr.plane.normal * (s.flip ? -1.0 : 1.0); double d = std::abs(s.distanceMm); if (s.distanceMm < 0) n = -n;
-    TopoDS_Shape face = b.face;
-    if (s.symmetric) { gp_Trsf t; t.SetTranslation(gp_Vec(-n.x * d / 2, -n.y * d / 2, -n.z * d / 2)); face = BRepBuilderAPI_Transform_Local(face, t); }
+    TopoDS_Shape face = b.face; TopLoc_Location shift;   // D1: the profile edges below must be looked up with the SAME location as the moved face
+    if (s.symmetric) { gp_Trsf t; t.SetTranslation(gp_Vec(-n.x * d / 2, -n.y * d / 2, -n.z * d / 2)); shift = TopLoc_Location(t); face = face.Moved(shift); }   // ONE Location object: TopLoc_Location equality compares the datum pointer, two Locations built from one gp_Trsf are not the same location
     BRepPrimAPI_MakePrism prism(face, gp_Vec(n.x * d, n.y * d, n.z * d));
     if (!prism.IsDone()) return fail("The extrusion failed.", "Change the distance or the profile.");
     NameMap names; TopoDS_Shape solid = prism.Shape();
@@ -164,7 +164,7 @@ class OcctKernel : public IGeometryKernel {
     if (int i = idx(prism.LastShape())) names.faces[i - 1] = TopoName{feature, Role::CapEnd, {}, 0};
     std::map<Uid, int> splitN;
     for (auto& [edge, src] : b.edges) {
-      TopTools_ListOfShape gen = prism.Generated(edge);
+      TopTools_ListOfShape gen = prism.Generated(edge.Moved(shift));
       for (auto it = gen.begin(); it != gen.end(); ++it) if (int i = idx(*it)) names.faces[i - 1] = TopoName{feature, Role::Side, src, (uint16_t)splitN[src]++};
     }
     return finishBody(solid, std::move(names), feature);
@@ -391,8 +391,14 @@ class OcctKernel : public IGeometryKernel {
   KernelResult chamferEdges(BodyHandle h, const ChamferSpec& s, Uid feature) override {
     try { return bevelResult(h, true, &s, nullptr, feature); } catch (...) { return fail("The chamfer could not be made on this edge.", "Try a smaller distance or fewer edges."); }
   }
+  KernelResult bendBody(BodyHandle h, const BendSpec& s, Uid feature, BendReport* rep) override {   // F3: occt_bend.cpp
+    bevel::Input in; { std::lock_guard<std::mutex> lk(m_); auto it = bodies_.find(h.id); if (it == bodies_.end()) return fail("Reference lost: body.", "Pick the body again.");
+      in.shape = it->second.shape; in.faces = it->second.faces; in.edges = it->second.edges; in.faceNames = it->second.names.faces; in.edgeNames = it->second.names.edges; }
+    bevel::Out o = bevel::bend(in, s, feature, rep); if (!o.ok) return fail(o.error, o.fix);
+    NameMap names; names.faces = std::move(o.faceNames); return finishBody(o.shape, std::move(names), feature);
+  }
   KernelResult draftFaces(BodyHandle h, const DraftSpec& s, Uid feature) override {
-    try { return bevelResult(h, false, nullptr, &s, feature); } catch (...) { return fail("The taper could not be made.", "Try a smaller angle."); }
+    try { return bevelResult(h, false, nullptr, &s, feature); } catch (...) { return fail("The draft could not be made.", "Try a smaller angle."); }
   }
   std::optional<Aabb> bounds(BodyHandle h) override {
     try { return boundsImpl(h); } catch (const Standard_Failure&) { return std::nullopt; } catch (...) { return std::nullopt; }

@@ -49,6 +49,7 @@ bool makeWork(const TopoDS_Shape& shape, const TopTools_IndexedMapOfShape& inFac
 struct Input { TopoDS_Shape shape; TopTools_IndexedMapOfShape faces, edges; std::vector<TopoName> faceNames; std::vector<EdgeName> edgeNames; };
 Out chamfer(const Input& in, const ChamferSpec& spec, Uid feature);   // occt_chamfer.cpp (never throws)
 Out draft(const Input& in, const DraftSpec& spec, Uid feature);       // occt_draft.cpp (never throws)
+Out bend(const Input& in, const BendSpec& spec, Uid feature, BendReport* rep);   // occt_bend.cpp (F3, never throws; rep may be null)
 
 // Deterministic, platform independent (FNV-1a) id of an edge name; the name of a face made by a chamfer: {feature, Side, edgeUid, tie}.
 Uid edgeUid(const EdgeName& e);

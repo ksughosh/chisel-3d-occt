@@ -4,6 +4,8 @@
 // a POSITIVE angle then tilts the face inward (the body loses material). The kernel verifies that sign on every result.
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -15,10 +17,15 @@
 
 namespace chisel::bevel {
 namespace {
-const char* kE = "The taper could not be made.";
+const char* kE = "The draft could not be made.";
 const char* kF = "Try a smaller angle.";
-const char* kLostE = "This face cannot be tapered.";   // the face vanished in the unify or does not resolve
+const char* kLostE = "This face cannot be drafted.";   // the face vanished in the unify or does not resolve
 const char* kLostF = "Pick a different face.";
+// F-2: the refusal text states what the guard enforces. The lower bound is rounded UP (3 decimals) and the upper bound DOWN (2 decimals) so every stated value is accepted.
+std::string draftRangeFix() {
+  const double lo = std::ceil(kMinDraftRad * 180.0 / M_PI * 1000.0) / 1000.0, hi = std::floor(kMaxDraftRad * 180.0 / M_PI * 100.0) / 100.0;
+  char buf[96]; std::snprintf(buf, sizeof buf, "Use an angle between %g\xC2\xB0 and %g\xC2\xB0.", lo, hi); return buf;
+}
 
 std::vector<int> resolveFaces(const Input& in, const DraftSpec& spec) {
   std::vector<int> idx;
@@ -44,7 +51,7 @@ std::vector<TopoName> nameResult(BRepOffsetAPI_DraftAngle& da, const Work& w, co
 Out draft(const Input& in, const DraftSpec& spec, Uid feature) {
   try {
     if (!std::isfinite(spec.angleRad) || !finiteV(spec.pullDir) || !finiteV(spec.neutralOrigin) || glm::length(spec.pullDir) < 1e-12) return refuse(kE, "Enter a valid angle.");
-    double a = std::abs(spec.angleRad); if (a < kMinDraftRad || a > kMaxDraftRad) return refuse("The taper is too small or too large to make.", "Use an angle between 0.01° and 85°.");
+    double a = std::abs(spec.angleRad); if (a < kMinDraftRad || a > kMaxDraftRad) return refuse("The draft is too small or too large to make.", draftRangeFix().c_str());
     std::vector<int> idx = resolveFaces(in, spec); if (idx.empty()) return refuse(kLostE, kLostF);
     Work w; if (!makeWork(in.shape, in.faces, in.edges, in.faceNames, w)) return refuse(kE, kF);
     glm::dvec3 d = glm::normalize(spec.pullDir); gp_Dir dir(d.x, d.y, d.z); gp_Pln neutral(gp_Pnt(spec.neutralOrigin.x, spec.neutralOrigin.y, spec.neutralOrigin.z), dir);
