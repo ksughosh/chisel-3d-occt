@@ -1,21 +1,45 @@
 # chisel-3d-occt
 
-OCCT (Open CASCADE Technology) bindings and build scripts for [Chisel 3D](https://github.com/ksughosh/chisel-3d), a pen-and-touch B-rep CAD application for Android tablets.
+Source of the LGPL-covered part of Chisel 3D, a pen-and-touch CAD app for Android tablets: the
+adapter that links the Open CASCADE Technology (OCCT) geometry kernel, and the scripts that build it.
 
-## Purpose
+## Licence
 
-This public repository holds the OCCT-specific code that is subject to the **LGPL-2.1-or-later** license:
+Every file here is **LGPL-2.1-only** (`SPDX-License-Identifier` in each file; full text in `LICENSE` and
+`LICENSES/LGPL-2.1.txt`). OCCT itself is LGPL-2.1 with the OCCT exception 1.0 (`LICENSES/OCCT-LGPL-exception-1.0.txt`).
+The interface headers (`geometry_kernel.h`, `kernel_types.h`, `uid.h`) are dual-licensed `LGPL-2.1-only OR
+LicenseRef-Chisel-Project`. The rest of Chisel 3D (UI, document model, renderer) is a separate, closed-source work that
+talks to this library only through the two exported C functions in `native/occt/exports.map`.
 
-- OCCT build configuration for Android ARM64
-- JNI/C++ kernel bindings (`occt_kernel.cpp` and related)
-- Build scripts producing `libchisel_occt.so`
+## What is here
 
-## License
+Files keep the same relative paths as in the Chisel 3D source tree (list: `MIRRORED_FILES.txt`; the Chisel 3D commit
+they were copied from: `MIRROR_SOURCE_COMMIT`).
 
-OCCT bindings and build scripts in this repository are licensed under **[LGPL-2.1-or-later](LICENSE)**.
+| Path | Role |
+|---|---|
+| `native/occt/occt_entry.cpp`, `occt_abi.h`, `exports.map`, `CMakeLists.txt` | `libchisel_occt.so`: entry points `chisel_occt_abi` / `chisel_occt_make`, ABI version, version script, build |
+| `native/core/src/kernel/occt_kernel.cpp` | The OCCT adapter (implements `IGeometryKernel`) |
+| `native/core/src/kernel/kernel_common.cpp`, `native/core/src/common/uid.cpp` | Small helpers the adapter needs |
+| `native/core/include/chisel/kernel/geometry_kernel.h`, `kernel_types.h`, `native/core/include/chisel/common/uid.h` | Interface between the library and the app |
+| `tools/occt/build_occt.sh`, `README.md`, `check_occt_lib.sh` | Build OCCT 8.0.1 from upstream source and check the result |
 
-OCCT itself remains under its own license; this repository references OCCT source from its official distribution.
+## Building `libchisel_occt.so`
 
-## Relationship to Chisel 3D
+1. Build the OCCT static archives: `tools/occt/build_occt.sh android-static` (Android NDK r28, arm64-v8a; OCCT source is
+   fetched from the upstream tag, see `tools/occt/README.md`).
+2. Configure `native/occt` with the NDK CMake toolchain (`-DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30
+   -DANDROID_STL=c++_shared -DCHISEL_THIRD_PARTY=<dir with occt/android-arm64-static and src/glm>`) and build target
+   `chisel_occt`. The link uses 16 KB pages (`-z max-page-size=16384`), required on Android 15+.
+3. `tools/occt/check_occt_lib.sh` verifies exports and alignment.
 
-Chisel 3D (`ksughosh/chisel-3d`) references this repository as a dependency for the optional OCCT geometry kernel. The mesh kernel remains the default; OCCT is dynamically loaded (`dlopen`) after frame 1 with a mesh fallback. Per ADR-011, the literal string "OCCT" never appears in user-facing copy; the user-facing name is "precise geometry engine".
+## Replacing the library in the app
+
+Replace `lib/arm64-v8a/libchisel_occt.so` in the Chisel 3D APK with your build, run `zipalign -P 16`, re-sign with
+`apksigner`, and reinstall. Your build must report the same ABI version (`kChiselOcctAbi` in `native/occt/occt_abi.h`).
+
+## Status
+
+- The Chisel 3D release build currently ships the basic (mesh) engine and no OCCT. Shipping `libchisel_occt.so` and
+  loading it at run time is planned (decision ADR-019); this repository already holds its exact sources.
+- This repository is a mirror: changes are made in the Chisel 3D tree first and copied here byte-for-byte.

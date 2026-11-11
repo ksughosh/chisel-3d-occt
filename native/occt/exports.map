@@ -1,0 +1,9 @@
+/* SPDX-License-Identifier: LGPL-2.1-only */
+/* Version script for libchisel_occt.so (spec 16 6.1, ADR-019): the loader sees exactly two symbols. */
+CHISEL_OCCT_1 {
+  global:
+    chisel_occt_abi;
+    chisel_occt_make;
+  local:
+    *;
+};

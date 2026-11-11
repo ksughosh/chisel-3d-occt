@@ -1,0 +1,15 @@
+native/core/src/kernel/occt_kernel.cpp
+native/core/src/kernel/kernel_common.cpp
+native/core/src/common/uid.cpp
+native/core/include/chisel/common/uid.h
+native/core/include/chisel/kernel/geometry_kernel.h
+native/core/include/chisel/kernel/kernel_types.h
+native/occt/occt_entry.cpp
+native/occt/occt_abi.h
+native/occt/exports.map
+native/occt/CMakeLists.txt
+tools/occt/build_occt.sh
+tools/occt/README.md
+tools/occt/check_occt_lib.sh
+LICENSES/LGPL-2.1.txt
+LICENSES/OCCT-LGPL-exception-1.0.txt
