@@ -4,16 +4,19 @@
 #include <cmath>
 #include <map>
 #include <mutex>
+#include <exception>
 #include <unordered_map>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BOPAlgo_Operation.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <Bnd_Box.hxx>
+#include <Standard_Failure.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -122,10 +125,21 @@ class OcctKernel : public IGeometryKernel {
     return r;
   }
 
+  // NaN/inf survive glm::normalize and gp_Dir (OCCT's zero-magnitude test is false for NaN), so the adapter rejects them before building.
+  static bool finite(V3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+  static bool finiteProfile(const Profile2D& pr) {
+    const PlaneFrame& f = pr.plane;
+    if (!finite(f.origin) || !finite(f.normal) || !finite(f.xAxis) || !finite(f.yAxis) || glm::length(f.normal) < 1e-12 || glm::length(f.xAxis) < 1e-12) return false;
+    for (auto& l : pr.loops) for (auto& e : l)
+      if (!std::isfinite(e.a.x) || !std::isfinite(e.a.y) || !std::isfinite(e.b.x) || !std::isfinite(e.b.y) || !std::isfinite(e.c.x) || !std::isfinite(e.c.y) || !std::isfinite(e.r)) return false;
+    return true;
+  }
+
   KernelResult fail(const std::string& e, const std::string& f) { KernelResult r; r.ok = false; r.error = e; r.fix = f; return r; }
 
-  KernelResult extrude(const Profile2D& pr, const ExtrudeSpec& s, Uid feature) override {
+  KernelResult extrudeImpl(const Profile2D& pr, const ExtrudeSpec& s, Uid feature) {
     if (pr.loops.empty() || pr.areaMm2 <= 0) return fail("The profile is empty.", "Select a closed region.");
+    if (!finiteProfile(pr) || !std::isfinite(s.distanceMm)) return fail("The profile has invalid geometry.", "Check the sketch profile.");
     if (std::abs(s.distanceMm) < 1e-12) return fail("Distance is 0.", "Enter a non-zero distance.");
     Built b = buildFace(pr); if (!b.ok) return fail(b.err, "Check the sketch profile.");
     V3 n = pr.plane.normal * (s.flip ? -1.0 : 1.0); double d = std::abs(s.distanceMm); if (s.distanceMm < 0) n = -n;
@@ -149,8 +163,9 @@ class OcctKernel : public IGeometryKernel {
 
   static TopoDS_Shape BRepBuilderAPI_Transform_Local(const TopoDS_Shape& s, const gp_Trsf& t) { return s.Moved(TopLoc_Location(t)); }
 
-  KernelResult revolve(const Profile2D& pr, const RevolveSpec& s, Uid feature) override {
+  KernelResult revolveImpl(const Profile2D& pr, const RevolveSpec& s, Uid feature) {
     if (pr.loops.empty() || pr.areaMm2 <= 0) return fail("The profile is empty.", "Select a closed region.");
+    if (!finiteProfile(pr) || !std::isfinite(s.angleRad) || !finite(s.axisOrigin) || !finite(s.axisDir) || glm::length(s.axisDir) < 1e-12) return fail("The revolve axis is not valid.", "Pick an axis outside the profile.");
     if (std::abs(s.angleRad) < 1e-9) return fail("Angle is 0.", "Enter a non-zero angle.");
     Built b = buildFace(pr); if (!b.ok) return fail(b.err, "Check the sketch profile.");
     V3 ax = glm::normalize(s.axisDir);
@@ -177,19 +192,28 @@ class OcctKernel : public IGeometryKernel {
     return finishBody(solid, std::move(names), feature);
   }
 
-  KernelResult boolean(BoolOp op, BodyHandle target, BodyHandle tool, Uid feature) override {
+  KernelResult booleanImpl(BoolOp op, BodyHandle target, BodyHandle tool, Uid feature) {
     Body *t = get(target), *u = get(tool);
     if (!t || !u) return fail("Reference lost: body.", "Pick the body again.");
     double v0 = props(t->shape).Mass();
+    // Build-after-configure pattern: construct empty, set arguments / tools / operation / options, then Build().
     std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop;
-    if (op == BoolOp::Join) bop = std::make_unique<BRepAlgoAPI_Fuse>(t->shape, u->shape);
-    else if (op == BoolOp::Cut) bop = std::make_unique<BRepAlgoAPI_Cut>(t->shape, u->shape);
-    else bop = std::make_unique<BRepAlgoAPI_Common>(t->shape, u->shape);
+    if (op == BoolOp::Join) bop = std::make_unique<BRepAlgoAPI_Fuse>();
+    else if (op == BoolOp::Cut) bop = std::make_unique<BRepAlgoAPI_Cut>();
+    else bop = std::make_unique<BRepAlgoAPI_Common>();
+    bop->SetOperation(op == BoolOp::Join ? BOPAlgo_FUSE : op == BoolOp::Cut ? BOPAlgo_CUT : BOPAlgo_COMMON);
+    { TopTools_ListOfShape args, tools; args.Append(t->shape); tools.Append(u->shape); bop->SetArguments(args); bop->SetTools(tools); }
+    // HYPOTHESIS U20 (spec 16 5.1.4): a fuzzy tolerance of 1e-7 mm absorbs the coincident-face noise that sketch-derived solids produce (flush
+    // faces, shared edges) without merging real features; NOT yet measured on the Tab S7+ boolean corpus (KERN-4 golden + fuzz tests decide).
+    // SetNonDestructive keeps both operands untouched, so a failed or rejected operation leaves the registered bodies exactly as they were.
+    bop->SetFuzzyValue(1e-7);
+    bop->SetNonDestructive(true);
+    bop->Build();
     if (!bop->IsDone() || bop->HasErrors()) return fail("The boolean operation failed.", "Move the profile or change the distance.");
     TopoDS_Shape res = bop->Shape();
     double v1 = props(res).Mass();
     if (op == BoolOp::Cut && std::abs(v1 - v0) <= 1e-9 * std::max(1.0, v0)) return fail("Cut does not intersect the body.", "Move the profile or change the distance.");
-    if (op == BoolOp::Intersect && v1 <= 1e-9) return fail("Intersect has no overlap with the body.", "Move the profile or change the distance.");   // disjoint operands: Common succeeds with an empty shape
+    if (op == BoolOp::Intersect && v1 <= 1e-9) return fail("Intersect leaves nothing of the body.", "Move the profile onto the body, or choose New body.");   // disjoint operands: Common succeeds with an empty shape
     if (op == BoolOp::Join && std::abs(v1 - v0) <= 1e-9 * std::max(1.0, v0) && std::abs(v1 - (v0 + props(u->shape).Mass())) > 1e-6) { /* contained tool: still valid */ }
     NameMap names; TopTools_IndexedMapOfShape faces; TopExp::MapShapes(res, TopAbs_FACE, faces);
     names.faces.assign(faces.Extent(), TopoName{feature, Role::Side, {}, 0});
@@ -217,7 +241,7 @@ class OcctKernel : public IGeometryKernel {
   }
   static GProp_GProps props(const TopoDS_Shape& s) { GProp_GProps p; BRepGProp::VolumeProperties(s, p); return p; }
 
-  KernelResult copyBody(BodyHandle h, Uid feature) override {
+  KernelResult copyBodyImpl(BodyHandle h, Uid feature) {
     Body* b = get(h); if (!b) return fail("Reference lost: body.", "Pick the body again.");
     BRepBuilderAPI_Copy cp(b->shape, true);   // deep copy; face enumeration order is preserved, so names map by index
     TopoDS_Shape s = cp.Shape();
@@ -228,25 +252,25 @@ class OcctKernel : public IGeometryKernel {
     if (f2.Extent() != b->faces.Extent()) return fail("The copy changed the face count.", "Try again.");
     return finishBody(s, std::move(names), feature);
   }
-  std::optional<Aabb> bounds(BodyHandle h) override {
+  std::optional<Aabb> boundsImpl(BodyHandle h) {
     Body* b = get(h); if (!b) return std::nullopt;
     Bnd_Box box; BRepBndLib::Add(b->shape, box); if (box.IsVoid()) return std::nullopt;
     double x0, y0, z0, x1, y1, z1; box.Get(x0, y0, z0, x1, y1, z1);
     Aabb a; a.min = V3(x0, y0, z0); a.max = V3(x1, y1, z1); return a;
   }
 
-  MassProps massProps(BodyHandle h) override {
+  MassProps massPropsImpl(BodyHandle h) {
     Body* b = get(h); if (!b) return {};
     GProp_GProps p = props(b->shape); gp_Pnt c = p.CentreOfMass(); return {p.Mass(), V3(c.X(), c.Y(), c.Z())};
   }
-  bool validate(BodyHandle h, std::string* why) override {
+  bool validateImpl(BodyHandle h, std::string* why) {
     Body* b = get(h); if (!b) { if (why) *why = "unknown body"; return false; }
     BRepCheck_Analyzer an(b->shape);
     if (!an.IsValid() && why) *why = "BRepCheck reported an invalid shape";
     return an.IsValid();
   }
 
-  std::shared_ptr<const MeshData> tessellate(BodyHandle h, double chordTol, double angTol) override {
+  std::shared_ptr<const MeshData> tessellateImpl(BodyHandle h, double chordTol, double angTol) {
     Body* b = get(h); if (!b) return nullptr;
     BRepMesh_IncrementalMesh mesher(b->shape, chordTol, false, angTol, true);
     auto m = std::make_shared<MeshData>();
@@ -284,7 +308,7 @@ class OcctKernel : public IGeometryKernel {
     return m;
   }
 
-  std::optional<PlaneFrame> planarFace(BodyHandle h, const TopoName& n) override {
+  std::optional<PlaneFrame> planarFaceImpl(BodyHandle h, const TopoName& n) {
     Body* b = get(h); if (!b) return std::nullopt; auto i = b->names.find(n); if (!i) return std::nullopt;
     TopoDS_Face f = TopoDS::Face(b->faces(*i + 1)); BRepAdaptor_Surface s(f);
     if (s.GetType() != GeomAbs_Plane) return std::nullopt;
@@ -294,8 +318,8 @@ class OcctKernel : public IGeometryKernel {
     return fr;
   }
 
-  std::optional<Profile2D> faceProfile(BodyHandle h, const TopoName& n) override {
-    auto fr = planarFace(h, n); if (!fr) return std::nullopt;
+  std::optional<Profile2D> faceProfileImpl(BodyHandle h, const TopoName& n) {
+    auto fr = planarFaceImpl(h, n); if (!fr) return std::nullopt;
     Body* b = get(h); TopoDS_Face f = TopoDS::Face(b->faces(*b->names.find(n) + 1));
     Profile2D p; p.plane = *fr;
     auto to2 = [&](const gp_Pnt& q) { V3 w(q.X(), q.Y(), q.Z()); w -= fr->origin; return V2(glm::dot(w, fr->xAxis), glm::dot(w, fr->yAxis)); };
@@ -315,14 +339,62 @@ class OcctKernel : public IGeometryKernel {
     return p;
   }
 
-  std::vector<V3> snapPoints(BodyHandle h) override {
+  std::vector<V3> snapPointsImpl(BodyHandle h) {
     Body* b = get(h); std::vector<V3> out; if (!b) return out;
     TopTools_IndexedMapOfShape vs, es; TopExp::MapShapes(b->shape, TopAbs_VERTEX, vs); TopExp::MapShapes(b->shape, TopAbs_EDGE, es);
     for (int i = 1; i <= vs.Extent(); ++i) { gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vs(i))); out.emplace_back(p.X(), p.Y(), p.Z()); }
     for (int i = 1; i <= es.Extent(); ++i) { BRepAdaptor_Curve c(TopoDS::Edge(es(i))); gp_Pnt p = c.Value((c.FirstParameter() + c.LastParameter()) / 2); out.emplace_back(p.X(), p.Y(), p.Z()); }
     return out;
   }
-  void release(BodyHandle h) override { std::lock_guard<std::mutex> lk(m_); bodies_.erase(h.id); }
+
+  // ---- Public interface (KERN-2, spec 16 5.1.4 / 6.1): every entry point is guarded so an OCCT exception (Standard_Failure, or anything else)
+  // can never escape into the app. Reasons are engine-free (no "OCCT" in user-facing text, spec 17 S10); the raw exception text is dropped on purpose.
+  KernelResult extrude(const Profile2D& pr, const ExtrudeSpec& s, Uid feature) override {
+    try { return extrudeImpl(pr, s, feature); }
+    catch (const Standard_Failure&) { return fail("The extrusion failed.", "Change the distance or the profile."); }
+    catch (...) { return fail("The extrusion failed.", "Change the distance or the profile."); }
+  }
+  KernelResult revolve(const Profile2D& pr, const RevolveSpec& s, Uid feature) override {
+    try { return revolveImpl(pr, s, feature); }
+    catch (const Standard_Failure&) { return fail("The revolve failed.", "Change the angle or the axis."); }
+    catch (...) { return fail("The revolve failed.", "Change the angle or the axis."); }
+  }
+  KernelResult boolean(BoolOp op, BodyHandle target, BodyHandle tool, Uid feature) override {
+    try { return booleanImpl(op, target, tool, feature); }
+    catch (const Standard_Failure&) { return fail("The boolean operation failed.", "Move the profile or change the distance."); }
+    catch (...) { return fail("The boolean operation failed.", "Move the profile or change the distance."); }
+  }
+  KernelResult copyBody(BodyHandle h, Uid feature) override {
+    try { return copyBodyImpl(h, feature); }
+    catch (const Standard_Failure&) { return fail("The copy failed.", "Try again."); }
+    catch (...) { return fail("The copy failed.", "Try again."); }
+  }
+  std::optional<Aabb> bounds(BodyHandle h) override {
+    try { return boundsImpl(h); } catch (const Standard_Failure&) { return std::nullopt; } catch (...) { return std::nullopt; }
+  }
+  MassProps massProps(BodyHandle h) override {
+    try { return massPropsImpl(h); } catch (const Standard_Failure&) { return {}; } catch (...) { return {}; }
+  }
+  bool validate(BodyHandle h, std::string* why) override {
+    try { return validateImpl(h, why); }
+    catch (const Standard_Failure&) { if (why) *why = "The body could not be checked."; return false; }
+    catch (...) { if (why) *why = "The body could not be checked."; return false; }
+  }
+  std::shared_ptr<const MeshData> tessellate(BodyHandle h, double chordTol, double angTol) override {
+    try { return tessellateImpl(h, chordTol, angTol); } catch (const Standard_Failure&) { return nullptr; } catch (...) { return nullptr; }
+  }
+  std::optional<PlaneFrame> planarFace(BodyHandle h, const TopoName& n) override {
+    try { return planarFaceImpl(h, n); } catch (const Standard_Failure&) { return std::nullopt; } catch (...) { return std::nullopt; }
+  }
+  std::optional<Profile2D> faceProfile(BodyHandle h, const TopoName& n) override {
+    try { return faceProfileImpl(h, n); } catch (const Standard_Failure&) { return std::nullopt; } catch (...) { return std::nullopt; }
+  }
+  std::vector<V3> snapPoints(BodyHandle h) override {
+    try { return snapPointsImpl(h); } catch (const Standard_Failure&) { return {}; } catch (...) { return {}; }
+  }
+  void release(BodyHandle h) override {
+    try { std::lock_guard<std::mutex> lk(m_); bodies_.erase(h.id); } catch (const Standard_Failure&) {} catch (...) {}
+  }
 
  private:
   Body* get(BodyHandle h) { std::lock_guard<std::mutex> lk(m_); auto it = bodies_.find(h.id); return it == bodies_.end() ? nullptr : &it->second; }
