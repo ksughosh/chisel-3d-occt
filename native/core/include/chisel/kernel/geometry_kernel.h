@@ -54,7 +54,7 @@ struct MassProps { double volumeMm3 = 0; glm::dvec3 centroid{0}; };
 
 // What a kernel can do (spec 10 4.3 capability matrix). The UI is capability driven (Join/Cut disabled with a tooltip when !booleans).
 // KERN-5 (ADR-027, ABI 2): `chamfer` and `draft` are separate caps (ADR-023: each op by its own cap, never `exactBrep`). Both are appended at the end.
-struct KernelCaps { bool booleans = false, intersect = false, toFace = false, exactBrep = false, namesThroughBooleans = false, copy = false, chamfer = false, draft = false, bend = false, stepExport = false; };
+struct KernelCaps { bool booleans = false, intersect = false, toFace = false, exactBrep = false, namesThroughBooleans = false, copy = false, chamfer = false, draft = false, bend = false, stepExport = false, transform = false, stepImport = false; };
 
 // KERN-5 (G2 spec 4.1b/4.1c). Equal-distance chamfer of one or more edges. Each edge is named by NameMap::edges of the body (the two adjacent face names
 // plus `tie`, the rank among edges with the same face pair, sorted by edge midpoint). distanceMm >= 1e-3 (kMinChamferMm); every failure is an error, never a silent no-op.
@@ -75,6 +75,36 @@ struct BendReport { bool exact = false, boundKnown = false; double devSurfMm = 0
 struct StepBody { BodyHandle body; std::string name; };
 struct StepSpec { std::vector<StepBody> bodies; std::string path; std::string schema = "AP214IS"; };
 struct StepResult { bool ok = false; std::string error, fix; uint64_t bytes = 0; int bodies = 0; };
+
+// C8-G8 CONTRACT (ABI 3, ADR-027 pattern, spec 17 G8 4.2): exact import of a STEP file held in memory. The kernel parses `data` with units converted to
+// MILLIMETRES (it sets xstep.cascade.unit = MM on every call, under the STEP mutex), creates ONE body per SOLID in a deterministic order, names its faces
+// {feature, Role::Side, nil, faceIndex}, and returns labels from the file. Shapes that are not solids are counted, never imported. Never throws; never reads a path.
+// data == nullptr, size == 0 or size > INT_MAX -> status Unreadable. Default (caps().stepImport false): honest "not implemented".
+struct StepImportSpec {
+  const uint8_t* data = nullptr; size_t size = 0;      // the whole file; the caller keeps it alive for the call
+  Uid feature;                                          // the Imported node; every face name's `feature`
+  uint32_t maxSolids = 200; uint32_t maxFacesPerSolid = 65535;
+  bool (*cancelled)(void* user) = nullptr; void* user = nullptr;   // polled by the reader (UserBreak) and between solids
+};
+struct StepImportNode { std::string name; int parent = -1; };     // assembly products; -1 = root
+struct StepImportBody {
+  BodyHandle body; NameMap names;                       // owned by the caller when ok == true; release() frees it
+  std::string name;                                     // product name (UTF-8), "" if none
+  bool hasColour = false; float rgb[3] = {0, 0, 0};     // sRGB 0..1, opaque, solid-level STYLED_ITEM only
+  std::vector<std::string> layers;                      // presentation layers holding this solid, file order
+  int node = -1;                                        // index into StepImportResult::nodes of the owning product; -1 = none
+  int faces = 0; double volumeMm3 = 0;                  // replay check and OPN-04 acceptance
+  std::string extrasJson;                               // additive per-solid labels: UTF-8 JSON object or ""; unknown keys ignored by the host
+};
+// OWNERSHIP (binding): if ok == false, `bodies` is EMPTY: the kernel has released every body it created during the call.
+struct StepImportResult {
+  enum Status : uint8_t { Ok, Unreadable, TooManySolids, TooManyFaces, NoSolids, Cancelled };
+  bool ok = false; Status status = Unreadable; std::string error, fix;   // error/fix: developer log only; the host maps `status`
+  std::vector<StepImportBody> bodies; std::vector<StepImportNode> nodes;
+  int nonSolids = 0;                                    // count of top-level shapes that are not solids
+  uint32_t dropped = 0;                                 // bit 0 face-level colours, bit 1 extra layer assignments
+  std::string extrasJson;                               // additive file-level data: UTF-8 JSON object or ""; unknown keys ignored. New label kinds go here (no ABI 4).
+};
 
 class IGeometryKernel {
  public:
@@ -102,6 +132,12 @@ class IGeometryKernel {
   virtual KernelResult bendBody(BodyHandle, const BendSpec&, Uid /*feature*/, BendReport* /*out*/) { KernelResult r; r.ok = false; r.error = "not implemented"; r.fix = ""; return r; }
   // F6c CONTRACT default: honest "not implemented" (caps().stepExport stays false until KERN-6).
   virtual StepResult exportStep(const StepSpec&) { StepResult r; r.error = "not implemented"; return r; }
+  // C8-G5 CONTRACT (ADR-027 pattern, ABI 3): rigid motion of a whole body. `rigid` is a proper rigid motion (rotation part orthonormal, det +1, no scale;
+  // otherwise ok=false "not a rigid motion"). Input body never modified; the result is a NEW body whose face/edge names are the input's, byte-identical
+  // (TopoName.feature NOT rewritten, unlike copyBody); edge `tie` ranks are recomputed on the moved body. Default: honest "not implemented" (caps().transform false).
+  virtual KernelResult transformBody(BodyHandle, const glm::dmat4& /*rigid*/, Uid /*feature*/) { KernelResult r; r.ok = false; r.error = "not implemented"; r.fix = ""; return r; }
+  // C8-G8 CONTRACT default: honest "not implemented" (caps().stepImport stays false). See StepImportSpec / StepImportResult above.
+  virtual StepImportResult importStep(const StepImportSpec&) { StepImportResult r; r.error = "not implemented"; return r; }
 };
 // Reorders triangles face-contiguously and fills faceTriStart/faceEdgeStart/edgeFace. nFaces = number of mesh-local face ids (>= max triFace + 1).
 // edgeFacePairs: 2 x uint32 per edge segment (adjacent mesh-local faces, UINT32_MAX = none), parallel to edgeId / edgePos (6 floats each).

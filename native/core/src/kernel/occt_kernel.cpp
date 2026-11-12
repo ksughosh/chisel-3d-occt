@@ -27,6 +27,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -62,6 +63,7 @@
 namespace chisel {
 using V3 = glm::dvec3; using V2 = glm::dvec2;
 namespace stepexport { StepResult write(const std::vector<std::pair<TopoDS_Shape, std::string>>& shapes, const StepSpec& spec); }   // KERN-6: occt_step.cpp
+bool isRigidMotion(const glm::dmat4& m);   // kernel_common.cpp (C8-G5, shared with the mesh kernel)
 
 namespace {
 struct Body { TopoDS_Shape shape; NameMap names; TopTools_IndexedMapOfShape faces, edges; };
@@ -72,7 +74,7 @@ gp_Dir D(V3 v) { v = glm::normalize(v); return gp_Dir(v.x, v.y, v.z); }
 class OcctKernel : public IGeometryKernel {
  public:
   const char* name() const override { return "occt-8.0.1"; }
-  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
+  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; c.transform = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
 
   struct Built { TopoDS_Face face; std::vector<std::pair<TopoDS_Edge, Uid>> edges; bool ok = false; std::string err; };
 
@@ -171,8 +173,6 @@ class OcctKernel : public IGeometryKernel {
     return finishBody(solid, std::move(names), feature);
   }
 
-  static TopoDS_Shape BRepBuilderAPI_Transform_Local(const TopoDS_Shape& s, const gp_Trsf& t) { return s.Moved(TopLoc_Location(t)); }
-
   KernelResult revolveImpl(const Profile2D& pr, const RevolveSpec& s, Uid feature) {
     if (pr.loops.empty() || pr.areaMm2 <= 0) return fail("The profile is empty.", "Select a closed region.");
     if (!finiteProfile(pr) || !std::isfinite(s.angleRad) || !finite(s.axisOrigin) || !finite(s.axisDir) || glm::length(s.axisDir) < 1e-12) return fail("The revolve axis is not valid.", "Pick an axis outside the profile.");
@@ -260,6 +260,21 @@ class OcctKernel : public IGeometryKernel {
     for (auto& e : names.edges) { e.a.feature = feature; e.b.feature = feature; }
     TopTools_IndexedMapOfShape f2; TopExp::MapShapes(s, TopAbs_FACE, f2);
     if (f2.Extent() != b->faces.Extent()) return fail("The copy changed the face count.", "Try again.");
+    return finishBody(s, std::move(names), feature);
+  }
+  // C8-G5 (ABI 3, spec 17 3.3): rigid motion of a whole body. BRepBuilderAPI_Transform(copy = false) puts a TopLoc_Location on the shape (O(1), the triangulation is
+  // shared) and keeps the TopExp::MapShapes order, so the input NameMap carries over BY INDEX and byte-identical (feature NOT rewritten, unlike copyBodyImpl).
+  // finishBody then rebuilds every map from the RESULT shape and recomputes names.edges (ties rank by the moved world midpoints). glm is column-major: m[col][row].
+  KernelResult transformBodyImpl(BodyHandle h, const glm::dmat4& m, Uid feature) {
+    if (!isRigidMotion(m)) return fail("not a rigid motion", "Use only a move and a turn.");
+    Body* b = get(h); if (!b) return fail("Reference lost: body.", "Pick the body again.");
+    gp_Trsf t; t.SetValues(m[0][0], m[1][0], m[2][0], m[3][0], m[0][1], m[1][1], m[2][1], m[3][1], m[0][2], m[1][2], m[2][2], m[3][2]);
+    BRepBuilderAPI_Transform op(b->shape, t, Standard_False); op.Build();
+    if (!op.IsDone()) return fail("The body could not be moved.", "Undo, then try a smaller step.");
+    TopoDS_Shape s = op.Shape();
+    TopTools_IndexedMapOfShape f2; TopExp::MapShapes(s, TopAbs_FACE, f2);
+    if (f2.Extent() != b->faces.Extent()) return fail("The body could not be moved.", "Undo, then try a smaller step.");   // the by-index name carry-over needs the same face order
+    NameMap names = b->names;
     return finishBody(s, std::move(names), feature);
   }
   std::optional<Aabb> boundsImpl(BodyHandle h) {
@@ -378,6 +393,11 @@ class OcctKernel : public IGeometryKernel {
     try { return copyBodyImpl(h, feature); }
     catch (const Standard_Failure&) { return fail("The copy failed.", "Try again."); }
     catch (...) { return fail("The copy failed.", "Try again."); }
+  }
+  KernelResult transformBody(BodyHandle h, const glm::dmat4& m, Uid feature) override {
+    try { return transformBodyImpl(h, m, feature); }
+    catch (const Standard_Failure&) { return fail("The body could not be moved.", "Undo, then try a smaller step."); }
+    catch (...) { return fail("The body could not be moved.", "Undo, then try a smaller step."); }
   }
   // KERN-5 (ADR-027): chamfer and draft live in occt_chamfer.cpp / occt_draft.cpp; this adapter only registers the result body.
   KernelResult bevelResult(BodyHandle h, bool isChamfer, const ChamferSpec* cs, const DraftSpec* ds, Uid feature) {

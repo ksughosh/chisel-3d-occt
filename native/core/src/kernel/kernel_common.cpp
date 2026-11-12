@@ -73,4 +73,14 @@ void buildFaceRanges(MeshData& m, uint32_t nFaces, const std::vector<uint32_t>& 
   m.edgePos = std::move(ep); m.edgeId = std::move(eid);
 }
 
+// C8-G5 (ABI 3, spec 17 3.1/2.3): the guard of IGeometryKernel::transformBody, shared by both kernels (declared locally where used, like stepexport::write; the pinned
+// public header carries no helper). True only for a proper rigid motion: every entry finite, affine bottom row (0,0,0,1), rotation part R with |R^T R - I| <= 1e-9 and det R > 0.
+bool isRigidMotion(const glm::dmat4& m) {
+  for (int c = 0; c < 4; ++c) for (int r = 0; r < 4; ++r) if (!std::isfinite(m[c][r])) return false;
+  if (m[0][3] != 0.0 || m[1][3] != 0.0 || m[2][3] != 0.0 || m[3][3] != 1.0) return false;
+  glm::dmat3 R(m); glm::dmat3 e = glm::transpose(R) * R;
+  for (int c = 0; c < 3; ++c) for (int r = 0; r < 3; ++r) if (std::abs(e[c][r] - (c == r ? 1.0 : 0.0)) > 1e-9) return false;
+  return glm::determinant(R) > 0.0;
+}
+
 }  // namespace chisel
