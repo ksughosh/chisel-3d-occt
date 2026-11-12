@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LGPL-2.1-only
 # OCCT L1 build (ADR-001, ADR-019). Usage: tools/occt/build_occt.sh <android|android-static|host>
 # android-static (KERN-0): static archives for native/occt (one pruned libchisel_occt.so). Env overrides (size experiments):
+#   OCCT_STATIC_STEP=1(default; DataExchange+ApplicationFramework+Visualization ON)|0   OCCT_HOST_TAG=<suffix> (host mode alternate prefix)
 #   OCCT_STATIC_OPT=-O2(default)|-Os   OCCT_STATIC_LTO=none|thin   OCCT_STATIC_TAG=<suffix>  (suffix is appended to build dir and install dir)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"; cd "$ROOT"
@@ -9,9 +10,12 @@ OCCT_TAG=V8_0_1; OCCT_COMMIT=b8f597c677811d1f9f4d8a97f5ae2825c0353a42
 SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"; CM="$SDK/cmake/3.31.6/bin"; NDK="$SDK/ndk/28.2.13676358"
 [[ -d third_party/src/occt ]] || git clone --depth 1 --branch "$OCCT_TAG" https://github.com/Open-Cascade-SAS/OCCT.git third_party/src/occt
 test "$(git -C third_party/src/occt rev-parse HEAD)" = "$OCCT_COMMIT" || { echo "FAIL: OCCT commit mismatch"; exit 1; }
+# KERN-6 (U38, spec 17 8.1c): STEP writer = TKDESTEP + TKXSBase + TKDE; TKDESTEP declares TKXCAF/TKCAF/TKLCAF/TKCDF (ApplicationFramework) and TKService/TKV3d (Visualization).
+# OCCT_STATIC_STEP=0 keeps the old minimal module set (size experiments). Nothing third-party is linked (USE_FREETYPE/FREEIMAGE/RAPIDJSON/DRACO/TBB/VTK/TK/OPENGL/GLES2 stay OFF).
+STEP_MODS=ON; [[ "${OCCT_STATIC_STEP:-1}" == 0 ]] && STEP_MODS=OFF
 COMMON=(-G Ninja -DCMAKE_MAKE_PROGRAM="$CM/ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_LIBRARY_TYPE=Shared
   -DBUILD_MODULE_FoundationClasses=ON -DBUILD_MODULE_ModelingData=ON -DBUILD_MODULE_ModelingAlgorithms=ON
-  -DBUILD_MODULE_Visualization=OFF -DBUILD_MODULE_ApplicationFramework=OFF -DBUILD_MODULE_DataExchange=OFF -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_DETools=OFF
+  -DBUILD_MODULE_Visualization=$STEP_MODS -DBUILD_MODULE_ApplicationFramework=$STEP_MODS -DBUILD_MODULE_DataExchange=$STEP_MODS -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_DETools=OFF
   -DUSE_FREETYPE=OFF -DUSE_TK=OFF -DUSE_OPENGL=OFF -DUSE_GLES2=OFF -DUSE_FREEIMAGE=OFF -DUSE_RAPIDJSON=OFF -DUSE_DRACO=OFF -DUSE_TBB=OFF -DUSE_VTK=OFF -DBUILD_DOC_Overview=OFF)
 case "${1:?android|android-static|host}" in
   android)
@@ -31,6 +35,7 @@ case "${1:?android|android-static|host}" in
     "$CM/cmake" --build "$BD" -j"$(sysctl -n hw.ncpu)" && "$CM/cmake" --install "$BD"
     echo "android-static OK: $ID/lib ($(ls "$ID"/lib/*.a | wc -l | tr -d ' ') archives; opt=$OPT lto=$LTO)" ;;
   host)
-    "$CM/cmake" -S third_party/src/occt -B build/occt-host "${COMMON[@]}" -DINSTALL_DIR="$PWD/third_party/occt/macos-arm64"
-    "$CM/cmake" --build build/occt-host -j"$(sysctl -n hw.ncpu)" && "$CM/cmake" --install build/occt-host ;;
+    HTAG="${OCCT_HOST_TAG:-}"   # alternate prefix (e.g. -step): build/occt-host<tag> -> third_party/occt/macos-arm64<tag>; the shared default tree is untouched
+    "$CM/cmake" -S third_party/src/occt -B "build/occt-host$HTAG" "${COMMON[@]}" -DINSTALL_DIR="$PWD/third_party/occt/macos-arm64$HTAG"
+    "$CM/cmake" --build "build/occt-host$HTAG" -j"$(sysctl -n hw.ncpu)" && "$CM/cmake" --install "build/occt-host$HTAG" ;;
 esac

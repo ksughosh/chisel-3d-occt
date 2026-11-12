@@ -24,7 +24,7 @@ if(NOT EXISTS "${CHISEL_OCCT_ARCHIVE_DIR}/lib/libTKernel.a")
 endif()
 
 # The 15 toolkits the adapter needs (KERN-5, ADR-027: + TKFillet for BRepFilletAPI_MakeChamfer, + TKOffset for BRepOffsetAPI_DraftAngle; TKFeat/TKHelix/TKHLR are not linked).
-set(CHISEL_OCCT_TKS TKBO TKBool TKShHealing TKTopAlgo TKGeomAlgo TKGeomBase TKPrim TKMesh TKBRep TKG3d TKG2d TKMath TKernel TKFillet TKOffset)
+set(CHISEL_OCCT_TKS TKBO TKBool TKShHealing TKTopAlgo TKGeomAlgo TKGeomBase TKPrim TKMesh TKBRep TKG3d TKG2d TKMath TKernel TKFillet TKOffset TKDESTEP TKXSBase TKDE)   # KERN-6 (U38): STEP writer; add TKXCAF TKCAF TKLCAF TKCDF only if the link reports undefined XCAF symbols
 set(_core "${CMAKE_CURRENT_SOURCE_DIR}/../core")
 # LGPL publish set (KERN-2, spec 16 8.2a): exactly these seven translation units (KERN-5 added occt_bevel_guard/occt_chamfer/occt_draft). kernel_common.cpp holds the shared
 # helpers (buildFaceRanges, NameMap::find, TopoName::str, loopSignedArea); uid.cpp holds Uid. No sketch, document or JSON code is compiled in.
@@ -35,6 +35,7 @@ add_library(chisel_occt SHARED
   ${_core}/src/kernel/occt_chamfer.cpp
   ${_core}/src/kernel/occt_draft.cpp
   ${_core}/src/kernel/occt_bend.cpp
+  ${_core}/src/kernel/occt_step.cpp
   ${_core}/src/kernel/kernel_common.cpp
   ${_core}/src/common/uid.cpp)
 if(NOT CHISEL_OCCT_IN_ALL)
@@ -45,7 +46,7 @@ target_include_directories(chisel_occt SYSTEM PRIVATE
   ${CHISEL_THIRD_PARTY}/src/eigen ${CHISEL_THIRD_PARTY}/src/glm ${CHISEL_THIRD_PARTY}/src/json ${CHISEL_THIRD_PARTY}/src/earcut/include
   ${CHISEL_OCCT_ARCHIVE_DIR}/include/opencascade)
 target_compile_definitions(chisel_occt PRIVATE GLM_ENABLE_EXPERIMENTAL GLM_FORCE_RADIANS CHISEL_KERNEL_NAME="occt")
-set_source_files_properties(${_core}/src/kernel/occt_kernel.cpp ${_core}/src/kernel/occt_bevel_guard.cpp ${_core}/src/kernel/occt_chamfer.cpp ${_core}/src/kernel/occt_draft.cpp ${_core}/src/kernel/occt_bend.cpp PROPERTIES COMPILE_OPTIONS "-Wno-deprecated-declarations")
+set_source_files_properties(${_core}/src/kernel/occt_kernel.cpp ${_core}/src/kernel/occt_bevel_guard.cpp ${_core}/src/kernel/occt_chamfer.cpp ${_core}/src/kernel/occt_draft.cpp ${_core}/src/kernel/occt_bend.cpp ${_core}/src/kernel/occt_step.cpp PROPERTIES COMPILE_OPTIONS "-Wno-deprecated-declarations")
 target_compile_options(chisel_occt PRIVATE ${CHISEL_OCCT_OPT} -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden -Wall -Wextra)
 if(CHISEL_OCCT_LTO STREQUAL "thin")
   target_compile_options(chisel_occt PRIVATE -flto=thin)

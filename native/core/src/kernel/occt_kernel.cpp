@@ -61,6 +61,7 @@
 
 namespace chisel {
 using V3 = glm::dvec3; using V2 = glm::dvec2;
+namespace stepexport { StepResult write(const std::vector<std::pair<TopoDS_Shape, std::string>>& shapes, const StepSpec& spec); }   // KERN-6: occt_step.cpp
 
 namespace {
 struct Body { TopoDS_Shape shape; NameMap names; TopTools_IndexedMapOfShape faces, edges; };
@@ -71,7 +72,7 @@ gp_Dir D(V3 v) { v = glm::normalize(v); return gp_Dir(v.x, v.y, v.z); }
 class OcctKernel : public IGeometryKernel {
  public:
   const char* name() const override { return "occt-8.0.1"; }
-  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
+  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
 
   struct Built { TopoDS_Face face; std::vector<std::pair<TopoDS_Edge, Uid>> edges; bool ok = false; std::string err; };
 
@@ -396,6 +397,18 @@ class OcctKernel : public IGeometryKernel {
       in.shape = it->second.shape; in.faces = it->second.faces; in.edges = it->second.edges; in.faceNames = it->second.names.faces; in.edgeNames = it->second.names.edges; }
     bevel::Out o = bevel::bend(in, s, feature, rep); if (!o.ok) return fail(o.error, o.fix);
     NameMap names; names.faces = std::move(o.faceNames); return finishBody(o.shape, std::move(names), feature);
+  }
+  StepResult exportStep(const StepSpec& s) override {   // KERN-6: occt_step.cpp (bodies must be valid B-reps, never faked as facets)
+    StepResult bad; bad.error = "The STEP file could not be made."; bad.fix = "Try again, or export 3MF.";
+    try {
+      std::vector<std::pair<TopoDS_Shape, std::string>> shapes;
+      for (const auto& sb : s.bodies) {
+        Body* b = get(sb.body); if (!b) { bad.error = "Reference lost: body."; bad.fix = "Pick the body again."; return bad; }
+        if (!BRepCheck_Analyzer(b->shape).IsValid()) return bad;
+        shapes.emplace_back(b->shape, sb.name);
+      }
+      return stepexport::write(shapes, s);
+    } catch (const Standard_Failure&) { return bad; } catch (...) { return bad; }
   }
   KernelResult draftFaces(BodyHandle h, const DraftSpec& s, Uid feature) override {
     try { return bevelResult(h, false, nullptr, &s, feature); } catch (...) { return fail("The draft could not be made.", "Try a smaller angle."); }
