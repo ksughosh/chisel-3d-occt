@@ -37,6 +37,7 @@ add_library(chisel_occt SHARED
   ${_core}/src/kernel/occt_bend.cpp
   ${_core}/src/kernel/occt_step.cpp
   ${_core}/src/kernel/occt_step_import.cpp
+  ${_core}/src/kernel/occt_modify.cpp   # FR-30 (ADR-039): fillet, shell, offset face, delete face
   ${_core}/src/kernel/kernel_common.cpp
   ${_core}/src/common/uid.cpp)
 if(NOT CHISEL_OCCT_IN_ALL)
@@ -47,7 +48,7 @@ target_include_directories(chisel_occt SYSTEM PRIVATE
   ${CHISEL_THIRD_PARTY}/src/eigen ${CHISEL_THIRD_PARTY}/src/glm ${CHISEL_THIRD_PARTY}/src/json ${CHISEL_THIRD_PARTY}/src/earcut/include
   ${CHISEL_OCCT_ARCHIVE_DIR}/include/opencascade)
 target_compile_definitions(chisel_occt PRIVATE GLM_ENABLE_EXPERIMENTAL GLM_FORCE_RADIANS CHISEL_KERNEL_NAME="occt")
-set_source_files_properties(${_core}/src/kernel/occt_kernel.cpp ${_core}/src/kernel/occt_bevel_guard.cpp ${_core}/src/kernel/occt_chamfer.cpp ${_core}/src/kernel/occt_draft.cpp ${_core}/src/kernel/occt_bend.cpp ${_core}/src/kernel/occt_step.cpp ${_core}/src/kernel/occt_step_import.cpp PROPERTIES COMPILE_OPTIONS "-Wno-deprecated-declarations")
+set_source_files_properties(${_core}/src/kernel/occt_kernel.cpp ${_core}/src/kernel/occt_bevel_guard.cpp ${_core}/src/kernel/occt_chamfer.cpp ${_core}/src/kernel/occt_draft.cpp ${_core}/src/kernel/occt_bend.cpp ${_core}/src/kernel/occt_step.cpp ${_core}/src/kernel/occt_step_import.cpp ${_core}/src/kernel/occt_modify.cpp PROPERTIES COMPILE_OPTIONS "-Wno-deprecated-declarations")
 target_compile_options(chisel_occt PRIVATE ${CHISEL_OCCT_OPT} -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden -Wall -Wextra)
 if(CHISEL_OCCT_LTO STREQUAL "thin")
   target_compile_options(chisel_occt PRIVATE -flto=thin)

@@ -21,3 +21,4 @@ native/core/src/kernel/occt_bend.cpp
 native/core/src/kernel/occt_step.cpp
 native/core/src/kernel/occt_step_import.cpp
 native/core/src/kernel/occt_step_import.h
+native/core/src/kernel/occt_modify.cpp

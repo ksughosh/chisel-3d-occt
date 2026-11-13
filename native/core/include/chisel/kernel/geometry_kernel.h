@@ -13,11 +13,14 @@
 namespace chisel {
 
 enum class BoolOp : uint8_t { NewBody, Join, Cut, Intersect };
-enum class Role : uint8_t { Side, CapStart, CapEnd, RevSurface, RevCapStart, RevCapEnd, Seam };
+// Role is persisted as its integer and APPEND-ONLY. ABI 4 (ADR-040, KERN-R3-0): values 7..17 belong to the R3 ops; no op emits them until its lane lands.
+enum class Role : uint8_t { Side, CapStart, CapEnd, RevSurface, RevCapStart, RevCapEnd, Seam,
+  FilletFace = 7, ShellInner = 8, OffsetSide = 9, SweepSide = 10, SweepCapStart = 11, SweepCapEnd = 12, LoftSide = 13, LoftCapStart = 14, LoftCapEnd = 15, SplitFace = 16, HealFace = 17 };
 
 struct TopoName {
   Uid feature; Role role = Role::Side; Uid source; uint16_t split = 0;
-  std::string str() const;   // "ab12cd34.Side(1f2e3d4c)#0" for user messages
+  uint16_t inst = 0;         // ABI 4 (ADR-040): pattern instance index; 0 = the seed or not patterned
+  std::string str() const;   // "ab12cd34.Side(1f2e3d4c)#0" for user messages; "...#0@3" only when inst != 0 (inst == 0 is byte-identical to ABI 3)
   auto operator<=>(const TopoName&) const = default;
 };
 struct EdgeName { TopoName a, b; uint8_t tie = 0; };
@@ -49,12 +52,18 @@ struct MeshData {
   bool hasFaceRanges() const { return !faceTriStart.empty(); }
 };
 struct Aabb { glm::dvec3 min{0}, max{0}; };
-struct KernelResult { bool ok = false; std::string error, fix; BodyHandle body; NameMap names; };
+// ABI 4 (ADR-041): structured outcome of the R3 ops, so the core text table owns every user string. Named KernelOpStatus because the host-private
+// struct KernelStatus (kernel_status.h, which kernel is running) already uses that name. Meaningful only when ok == false: Ok there means "not classified"
+// (every pre-R3 failure path, which never sets it).
+enum class KernelOpStatus : uint8_t { Ok, Invalid, NoEffect, TooLarge, Cancelled, TimedOut, Unsupported };
+struct KernelResult { bool ok = false; std::string error, fix; BodyHandle body; NameMap names; KernelOpStatus status = KernelOpStatus::Ok; };
 struct MassProps { double volumeMm3 = 0; glm::dvec3 centroid{0}; };
 
 // What a kernel can do (spec 10 4.3 capability matrix). The UI is capability driven (Join/Cut disabled with a tooltip when !booleans).
 // KERN-5 (ADR-027, ABI 2): `chamfer` and `draft` are separate caps (ADR-023: each op by its own cap, never `exactBrep`). Both are appended at the end.
-struct KernelCaps { bool booleans = false, intersect = false, toFace = false, exactBrep = false, namesThroughBooleans = false, copy = false, chamfer = false, draft = false, bend = false, stepExport = false, transform = false, stepImport = false; };
+struct KernelCaps { bool booleans = false, intersect = false, toFace = false, exactBrep = false, namesThroughBooleans = false, copy = false, chamfer = false, draft = false, bend = false, stepExport = false, transform = false, stepImport = false,
+  // ABI 4 (ADR-039/041, KERN-R3-0): one cap per R3 op, all false until the op is implemented (honest defaults); the UI is capability driven.
+  fillet = false, shell = false, offsetFace = false, deleteFace = false, sweep = false, loft = false, split = false, mirror = false, exactMeasure = false, axisQuery = false; };
 
 // KERN-5 (G2 spec 4.1b/4.1c). Equal-distance chamfer of one or more edges. Each edge is named by NameMap::edges of the body (the two adjacent face names
 // plus `tie`, the rank among edges with the same face pair, sorted by edge midpoint). distanceMm >= 1e-3 (kMinChamferMm); every failure is an error, never a silent no-op.
@@ -106,6 +115,29 @@ struct StepImportResult {
   std::string extrasJson;                               // additive file-level data: UTF-8 JSON object or ""; unknown keys ignored. New label kinds go here (no ABI 4).
 };
 
+// ---------------------------------------------------------------- ABI 4 (ADR-039, KERN-R3-0): R3 contract, declared now, implemented per milestone ----------------
+// Every op below follows ADR-041: the input body is never modified, the result is a NEW body, every failure is an error (never a silent no-op), and the default
+// implementation is the honest "not implemented" (ok = false, status = Unsupported, the matching KernelCaps flag stays false).
+// Cancellation and time cap for the R3 ops; the adapter turns it into a Message_ProgressRange. cancelled == nullptr: never cancelled.
+struct OpControl { bool (*cancelled)(void* user) = nullptr; void* user = nullptr; double capSeconds = 10; };
+// FR-30 (spec 19 FR30 3.3). Fillet radius >= 1e-3 mm.
+struct FilletSpec { std::vector<EdgeName> edges; double radiusMm = 0; };
+struct ShellSpec { std::vector<TopoName> openFaces; double thicknessMm = 0; bool outward = false; };
+struct OffsetFaceSpec { std::vector<TopoName> faces; double distanceMm = 0; };   // signed, + = outward
+struct DeleteFaceSpec { std::vector<TopoName> faces; };
+// FR-31 (spec 19 FR31 3.4). One exact 3D curve piece of a sweep path or loft guide. Line: a -> b. Arc: a -> b about `centre`, in the plane normal to `normal`,
+// counter-clockwise about `normal`. BSpline: degree, knots (clamped, size poles + degree + 1) and poles (weights empty = non-rational).
+struct PathSegment {
+  enum Kind : uint8_t { Line, Arc, BSpline } kind = Line;
+  glm::dvec3 a{0}, b{0}, centre{0}, normal{0, 0, 1};
+  int degree = 3; std::vector<double> knots; std::vector<glm::dvec3> poles; std::vector<double> weights;
+};
+struct SweepSpec { Profile2D profile; std::vector<PathSegment> path; bool followPath = true; double twistRad = 0; };
+struct LoftSpec { std::vector<Profile2D> sections; std::vector<int> startVertex; std::vector<int8_t> dir; std::vector<PathSegment> guides; bool ruled = false; bool closed = false; };
+struct SplitSpec { enum Tool : uint8_t { Plane, Face, Curves } tool = Plane; PlaneFrame plane; TopoName face; std::vector<Profile2D> curves; };
+// FR-33 (spec 19 FR33 3.3): an axis found on a body edge (line direction, circle axis) or face (cylinder / cone axis).
+struct Axis { glm::dvec3 origin{0}, dir{0, 0, 1}; };
+
 class IGeometryKernel {
  public:
   virtual ~IGeometryKernel() = default;
@@ -138,6 +170,23 @@ class IGeometryKernel {
   virtual KernelResult transformBody(BodyHandle, const glm::dmat4& /*rigid*/, Uid /*feature*/) { KernelResult r; r.ok = false; r.error = "not implemented"; r.fix = ""; return r; }
   // C8-G8 CONTRACT default: honest "not implemented" (caps().stepImport stays false). See StepImportSpec / StepImportResult above.
   virtual StepImportResult importStep(const StepImportSpec&) { StepImportResult r; r.error = "not implemented"; return r; }
+
+  // ABI 4 CONTRACT defaults (KERN-R3-0, ADR-039 / ADR-041): every R3 op is APPENDED after importStep so no earlier vtable slot moves. Honest "not implemented"
+  // (ok = false, status = Unsupported); the matching caps() flag stays false until the op's lane lands. `feature` names the new faces (ADR-040).
+  virtual KernelResult filletEdges(BodyHandle, const FilletSpec&, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
+  virtual KernelResult shellBody(BodyHandle, const ShellSpec&, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
+  virtual KernelResult offsetFaces(BodyHandle, const OffsetFaceSpec&, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
+  virtual KernelResult deleteFaces(BodyHandle, const DeleteFaceSpec&, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
+  virtual KernelResult sweep(const SweepSpec&, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
+  virtual KernelResult loft(const LoftSpec&, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
+  // split: one result per piece (piece 0 = the largest volume, ADR-040 lineage rule); the default is ONE failed result.
+  virtual std::vector<KernelResult> split(BodyHandle, const SplitSpec&, Uid /*feature*/, const OpControl&) { return {unsupportedResult()}; }
+  // mirrorBody: reflection through `mirror` (the plane's normal is the mirror normal); transformBody keeps refusing det = -1.
+  virtual KernelResult mirrorBody(BodyHandle, const PlaneFrame& /*mirror*/, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
+  virtual std::optional<Axis> edgeAxis(BodyHandle, const EdgeName&) { return std::nullopt; }
+  virtual std::optional<Axis> faceAxis(BodyHandle, const TopoName&) { return std::nullopt; }
+ protected:
+  static KernelResult unsupportedResult() { KernelResult r; r.ok = false; r.error = "not implemented"; r.fix = ""; r.status = KernelOpStatus::Unsupported; return r; }
 };
 // Reorders triangles face-contiguously and fills faceTriStart/faceEdgeStart/edgeFace. nFaces = number of mesh-local face ids (>= max triFace + 1).
 // edgeFacePairs: 2 x uint32 per edge segment (adjacent mesh-local faces, UINT32_MAX = none), parallel to edgeId / edgePos (6 floats each).

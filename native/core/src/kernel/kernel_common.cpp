@@ -29,13 +29,16 @@ double loopSignedArea(const Loop& loop) {
 }
 
 static const char* roleName(Role r) {
-  static const char* n[] = {"Side", "CapStart", "CapEnd", "RevSurface", "RevCapStart", "RevCapEnd", "Seam"};
-  return n[static_cast<int>(r)];
+  static const char* n[] = {"Side", "CapStart", "CapEnd", "RevSurface", "RevCapStart", "RevCapEnd", "Seam",
+                              "FilletFace", "ShellInner", "OffsetSide", "SweepSide", "SweepCapStart", "SweepCapEnd", "LoftSide", "LoftCapStart", "LoftCapEnd", "SplitFace", "HealFace"};   // ABI 4 (ADR-040)
+  const size_t i = static_cast<size_t>(r);
+  return i < sizeof n / sizeof n[0] ? n[i] : "Unknown";
 }
 
 std::string TopoName::str() const {
   char buf[96];
-  std::snprintf(buf, sizeof buf, "%s.%s(%s)#%u", feature.hex().substr(0, 8).c_str(), roleName(role), source.hex().substr(0, 8).c_str(), split);
+  int n = std::snprintf(buf, sizeof buf, "%s.%s(%s)#%u", feature.hex().substr(0, 8).c_str(), roleName(role), source.hex().substr(0, 8).c_str(), split);
+  if (inst != 0 && n > 0 && static_cast<size_t>(n) < sizeof buf) std::snprintf(buf + n, sizeof buf - static_cast<size_t>(n), "@%u", inst);   // ADR-040: only when inst != 0
   return buf;
 }
 

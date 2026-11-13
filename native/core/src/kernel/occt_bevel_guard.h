@@ -17,8 +17,9 @@ constexpr double kMinDraftRad = 1e-4;
 constexpr double kMaxDraftRad = 1.5;
 
 // Result of a bevel operation before the adapter registers the body: the new shape plus one TopoName per face (MapShapes face order).
-struct Out { bool ok = false; std::string error, fix; TopoDS_Shape shape; std::vector<TopoName> faceNames; };
+struct Out { bool ok = false; std::string error, fix; TopoDS_Shape shape; std::vector<TopoName> faceNames; KernelOpStatus status = KernelOpStatus::Ok; /* FR-30 (ADR-041): set by the R3 ops */ };
 Out refuse(const char* error, const char* fix);
+Out refuse(KernelOpStatus status, const char* error, const char* fix);   // FR-30: structured status (ADR-041)
 
 // The body an operation works on: a COPY of the input (optionally unified, G2 4.1c) with maps in MapShapes order and parallel names.
 struct Work {
@@ -50,6 +51,12 @@ struct Input { TopoDS_Shape shape; TopTools_IndexedMapOfShape faces, edges; std:
 Out chamfer(const Input& in, const ChamferSpec& spec, Uid feature);   // occt_chamfer.cpp (never throws)
 Out draft(const Input& in, const DraftSpec& spec, Uid feature);       // occt_draft.cpp (never throws)
 Out bend(const Input& in, const BendSpec& spec, Uid feature, BendReport* rep);   // occt_bend.cpp (F3, never throws; rep may be null)
+// FR-30 (spec 19 FR30 3.3, ADR-040/041): occt_modify.cpp. Never throw; the input is never modified; every failure carries a KernelOpStatus.
+Out fillet(const Input& in, const FilletSpec& spec, Uid feature, const OpControl& ctl);
+Out shell(const Input& in, const ShellSpec& spec, Uid feature, const OpControl& ctl);
+Out offsetFaces(const Input& in, const OffsetFaceSpec& spec, Uid feature, const OpControl& ctl);
+Out deleteFaces(const Input& in, const DeleteFaceSpec& spec, Uid feature, const OpControl& ctl);
+Uid nameUid(const TopoName& n);   // deterministic FNV-1a id of a face name (the `source` of faces generated from that face, ADR-040)
 
 // Deterministic, platform independent (FNV-1a) id of an edge name; the name of a face made by a chamfer: {feature, Side, edgeUid, tie}.
 Uid edgeUid(const EdgeName& e);

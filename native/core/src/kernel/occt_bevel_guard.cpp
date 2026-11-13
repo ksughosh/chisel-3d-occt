@@ -28,6 +28,7 @@
 namespace chisel::bevel {
 
 Out refuse(const char* error, const char* fix) { Out o; o.ok = false; o.error = error; o.fix = fix; return o; }
+Out refuse(KernelOpStatus st, const char* error, const char* fix) { Out o = refuse(error, fix); o.status = st; return o; }
 
 bool finiteV(const glm::dvec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 
@@ -70,6 +71,12 @@ Uid edgeUid(const EdgeName& e) {
   auto fnv = [](uint64_t h, const std::string& s) { for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; } return h; };
   std::string a = e.a.str() + "|" + e.a.source.hex(), b = e.b.str() + "|" + e.b.source.hex();
   Uid u; u.hi = fnv(1469598103934665603ull, a + "/" + b); u.lo = fnv(0x9E3779B97F4A7C15ull, b + "/" + a + "#" + std::to_string(e.tie)); return u;
+}
+
+Uid nameUid(const TopoName& n) {
+  auto fnv = [](uint64_t h, const std::string& s) { for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; } return h; };
+  const std::string t = n.feature.hex() + "." + std::to_string((int)n.role) + "." + n.source.hex() + "." + std::to_string(n.split) + "@" + std::to_string(n.inst);
+  Uid u; u.hi = fnv(1469598103934665603ull, t); u.lo = fnv(0x9E3779B97F4A7C15ull, "face|" + t); return u;
 }
 
 void makeNamesUnique(std::vector<TopoName>& names) {

@@ -75,7 +75,7 @@ gp_Dir D(V3 v) { v = glm::normalize(v); return gp_Dir(v.x, v.y, v.z); }
 class OcctKernel : public IGeometryKernel {
  public:
   const char* name() const override { return "occt-8.0.1"; }
-  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; c.transform = true; c.stepImport = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
+  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; c.transform = true; c.fillet = true; c.shell = true; c.offsetFace = true; c.deleteFace = true; c.stepImport = true; return c; }   /* FR-30: occt_modify.cpp; C8-G8e: occt_step_import.cpp */   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
 
   struct Built { TopoDS_Face face; std::vector<std::pair<TopoDS_Edge, Uid>> edges; bool ok = false; std::string err; };
 
@@ -152,6 +152,7 @@ class OcctKernel : public IGeometryKernel {
 
   KernelResult extrudeImpl(const Profile2D& pr, const ExtrudeSpec& s, Uid feature) {
     if (pr.loops.empty() || pr.areaMm2 <= 0) return fail("The profile is empty.", "Select a closed region.");
+    for (const Loop& lp : pr.loops) for (const LoopEdge& le : lp) if (le.kind > LoopEdge::Circle) { KernelResult u = fail("not implemented", ""); u.status = KernelOpStatus::Unsupported; return u; }   // ABI 4 ellipse / B-spline pieces until the M6 lane (ADR-043)
     if (!finiteProfile(pr) || !std::isfinite(s.distanceMm)) return fail("The profile has invalid geometry.", "Check the sketch profile.");
     if (std::abs(s.distanceMm) < 1e-12) return fail("Distance is 0.", "Enter a non-zero distance.");
     Built b = buildFace(pr); if (!b.ok) return fail(b.err, "Check the sketch profile.");
@@ -176,6 +177,7 @@ class OcctKernel : public IGeometryKernel {
 
   KernelResult revolveImpl(const Profile2D& pr, const RevolveSpec& s, Uid feature) {
     if (pr.loops.empty() || pr.areaMm2 <= 0) return fail("The profile is empty.", "Select a closed region.");
+    for (const Loop& lp : pr.loops) for (const LoopEdge& le : lp) if (le.kind > LoopEdge::Circle) { KernelResult u = fail("not implemented", ""); u.status = KernelOpStatus::Unsupported; return u; }   // ABI 4 ellipse / B-spline pieces until the M6 lane (ADR-043)
     if (!finiteProfile(pr) || !std::isfinite(s.angleRad) || !finite(s.axisOrigin) || !finite(s.axisDir) || glm::length(s.axisDir) < 1e-12) return fail("The revolve axis is not valid.", "Pick an axis outside the profile.");
     if (std::abs(s.angleRad) < 1e-9) return fail("Angle is 0.", "Enter a non-zero angle.");
     Built b = buildFace(pr); if (!b.ok) return fail(b.err, "Check the sketch profile.");
@@ -412,6 +414,32 @@ class OcctKernel : public IGeometryKernel {
   }
   KernelResult chamferEdges(BodyHandle h, const ChamferSpec& s, Uid feature) override {
     try { return bevelResult(h, true, &s, nullptr, feature); } catch (...) { return fail("The chamfer could not be made on this edge.", "Try a smaller distance or fewer edges."); }
+  }
+  // FR-30 (spec 19 FR30 3.3, ADR-041): occt_modify.cpp; this adapter only copies the input out of the registry and registers the result body.
+  template <class Fn> KernelResult modifyResult(BodyHandle h, Fn op) {
+    bevel::Input in;
+    { std::lock_guard<std::mutex> lk(m_); auto it = bodies_.find(h.id);
+      if (it == bodies_.end()) { KernelResult r = fail("Reference lost: body.", "Pick the body again."); r.status = KernelOpStatus::Invalid; return r; }
+      in.shape = it->second.shape; in.faces = it->second.faces; in.edges = it->second.edges; in.faceNames = it->second.names.faces; in.edgeNames = it->second.names.edges; }
+    bevel::Out o = op(in);
+    if (!o.ok) { KernelResult r = fail(o.error, o.fix); r.status = o.status == KernelOpStatus::Ok ? KernelOpStatus::Invalid : o.status; return r; }
+    NameMap names; names.faces = std::move(o.faceNames); return finishBody(o.shape, std::move(names), Uid{});
+  }
+  KernelResult filletEdges(BodyHandle h, const FilletSpec& s, Uid feature, const OpControl& c) override {
+    try { return modifyResult(h, [&](const bevel::Input& in) { return bevel::fillet(in, s, feature, c); }); }
+    catch (...) { KernelResult r = fail("The fillet could not be made on this edge.", "Try a smaller radius or fewer edges."); r.status = KernelOpStatus::Invalid; return r; }
+  }
+  KernelResult shellBody(BodyHandle h, const ShellSpec& s, Uid feature, const OpControl& c) override {
+    try { return modifyResult(h, [&](const bevel::Input& in) { return bevel::shell(in, s, feature, c); }); }
+    catch (...) { KernelResult r = fail("The body could not be hollowed.", "Try a smaller thickness."); r.status = KernelOpStatus::Invalid; return r; }
+  }
+  KernelResult offsetFaces(BodyHandle h, const OffsetFaceSpec& s, Uid feature, const OpControl& c) override {
+    try { return modifyResult(h, [&](const bevel::Input& in) { return bevel::offsetFaces(in, s, feature, c); }); }
+    catch (...) { KernelResult r = fail("This face cannot be offset.", "Try a smaller distance."); r.status = KernelOpStatus::Invalid; return r; }
+  }
+  KernelResult deleteFaces(BodyHandle h, const DeleteFaceSpec& s, Uid feature, const OpControl& c) override {
+    try { return modifyResult(h, [&](const bevel::Input& in) { return bevel::deleteFaces(in, s, feature, c); }); }
+    catch (...) { KernelResult r = fail("These faces cannot be removed cleanly.", "Pick all faces of the feature."); r.status = KernelOpStatus::Invalid; return r; }
   }
   KernelResult bendBody(BodyHandle h, const BendSpec& s, Uid feature, BendReport* rep) override {   // F3: occt_bend.cpp
     bevel::Input in; { std::lock_guard<std::mutex> lk(m_); auto it = bodies_.find(h.id); if (it == bodies_.end()) return fail("Reference lost: body.", "Pick the body again.");
