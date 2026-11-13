@@ -47,6 +47,10 @@ std::mutex gStepMutex;
 std::once_flag gInitOnce;
 }  // namespace
 
+// C8-G8e (spec 17 G8 4.3 step 1): the STEP reader (occt_step_import.cpp) takes the SAME mutex and the same one-time Init (xstep.* statics are process-wide).
+std::mutex& stepMutex() { return gStepMutex; }
+void stepInitOnce() { std::call_once(gInitOnce, [] { STEPControl_Controller::Init(); }); }
+
 // `shapes`: one (shape, name) per body, in order. The file is written to `<path>.part` and renamed on success, so a failure never leaves a partial file
 // and never destroys an older file at `path`.
 StepResult write(const std::vector<std::pair<TopoDS_Shape, std::string>>& shapes, const StepSpec& spec) {

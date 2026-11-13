@@ -59,6 +59,7 @@
 
 #include "chisel/kernel/geometry_kernel.h"
 #include "occt_bevel_guard.h"
+#include "occt_step_import.h"
 
 namespace chisel {
 using V3 = glm::dvec3; using V2 = glm::dvec2;
@@ -74,7 +75,7 @@ gp_Dir D(V3 v) { v = glm::normalize(v); return gp_Dir(v.x, v.y, v.z); }
 class OcctKernel : public IGeometryKernel {
  public:
   const char* name() const override { return "occt-8.0.1"; }
-  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; c.transform = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
+  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; c.transform = true; c.stepImport = true; return c; }   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
 
   struct Built { TopoDS_Face face; std::vector<std::pair<TopoDS_Edge, Uid>> edges; bool ok = false; std::string err; };
 
@@ -430,6 +431,39 @@ class OcctKernel : public IGeometryKernel {
       return stepexport::write(shapes, s);
     } catch (const Standard_Failure&) { return bad; } catch (...) { return bad; }
   }
+  // C8-G8e (spec 17 G8 4.3): occt_step_import.cpp reads and labels the solids; this registers them. OWNERSHIP (A-2): on ANY failure every body made
+  // during the call is released before returning, so `bodies` is empty and the live-body count is unchanged (M37).
+  StepImportResult importStep(const StepImportSpec& s) override {
+    StepImportResult res; std::vector<uint64_t> made;
+    auto bail = [&](StepImportResult::Status st, const char* why) {
+      { std::lock_guard<std::mutex> lk(m_); for (uint64_t id : made) bodies_.erase(id); }
+      StepImportResult f; f.status = st; f.error = why; f.nonSolids = res.nonSolids; return f;
+    };
+    try {
+      stepimport::Read rd = stepimport::read(s);
+      res.nonSolids = rd.nonSolids;
+      if (!rd.ok) return bail(rd.status, rd.error.c_str());
+      for (auto& so : rd.solids) {
+        if (s.cancelled && s.cancelled(s.user)) return bail(StepImportResult::Cancelled, "cancelled");   // polled between solids (4.2)
+        TopTools_IndexedMapOfShape fm; TopExp::MapShapes(so.shape, TopAbs_FACE, fm);
+        if ((uint32_t)fm.Extent() > s.maxFacesPerSolid || fm.Extent() > 65535) return bail(StepImportResult::TooManyFaces, "too many faces in a solid");
+        NameMap names; names.faces.reserve(fm.Extent());
+        for (int k = 0; k < fm.Extent(); ++k) names.faces.push_back(TopoName{s.feature, Role::Side, Uid{}, (uint16_t)k});   // index WITHIN the solid (M16)
+        KernelResult kr = finishBody(so.shape, std::move(names), s.feature);
+        if (!kr.ok) return bail(StepImportResult::Unreadable, "body");
+        made.push_back(kr.body.id);
+        StepImportBody b; b.body = kr.body; b.names = kr.names; b.name = so.name; b.hasColour = so.hasColour;
+        for (int k = 0; k < 3; ++k) b.rgb[k] = so.rgb[k];
+        b.layers = so.layers; b.node = so.node; b.faces = fm.Extent();
+        GProp_GProps g; BRepGProp::VolumeProperties(so.shape, g); b.volumeMm3 = g.Mass();
+        res.bodies.push_back(std::move(b));
+      }
+      res.nodes = std::move(rd.nodes); res.dropped = rd.dropped; res.ok = true; res.status = StepImportResult::Ok;
+      return res;
+    } catch (const Standard_Failure&) { return bail(StepImportResult::Unreadable, "exception"); }
+    catch (...) { return bail(StepImportResult::Unreadable, "exception"); }
+  }
+  size_t liveBodyCountForTest() { std::lock_guard<std::mutex> lk(m_); return bodies_.size(); }   // T-STEP-FAIL-NO-LEAK hook (not in the pinned header)
   KernelResult draftFaces(BodyHandle h, const DraftSpec& s, Uid feature) override {
     try { return bevelResult(h, false, nullptr, &s, feature); } catch (...) { return fail("The draft could not be made.", "Try a smaller angle."); }
   }
@@ -467,5 +501,8 @@ class OcctKernel : public IGeometryKernel {
 }  // namespace
 
 std::unique_ptr<IGeometryKernel> makeOcctKernel() { return std::make_unique<OcctKernel>(); }
+// C8-G8e test seam (spec 17 G8 8.1 T-STEP-FAIL-NO-LEAK): live kernel bodies of an OCCT kernel, SIZE_MAX for any other kernel. Not in a public header;
+// the host test declares it itself.
+size_t occtLiveBodyCountForTest(IGeometryKernel& k) { auto* o = dynamic_cast<OcctKernel*>(&k); return o ? o->liveBodyCountForTest() : SIZE_MAX; }
 
 }  // namespace chisel
