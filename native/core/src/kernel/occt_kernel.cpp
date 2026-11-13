@@ -96,9 +96,13 @@ class OcctKernel : public IGeometryKernel {
           if (!e.ccw) edge.Reverse();
         } else {
           gp_Ax2 ax(P(f, e.c), D(f.normal), D(f.xAxis));
-          GC_MakeArcOfCircle arc(gp_Circ(ax, e.r), P(f, e.a), P(f, e.b), e.ccw);
+          // GC_MakeArcOfCircle(circ, P1, P2, Sense=false) does NOT give the clockwise arc P1->P2: it gives the complement (the long way round), so
+          // a CW loop edge (an arc bulging INTO the region) turned the face into nearly the whole disc (owner P0, arc_region_state.md).
+          // Always build the CCW arc (start->end in CCW order) and reverse the edge for CW travel.
+          GC_MakeArcOfCircle arc(gp_Circ(ax, e.r), P(f, e.ccw ? e.a : e.b), P(f, e.ccw ? e.b : e.a), true);
           if (!arc.IsDone()) { b.err = "An arc in the profile could not be built."; return b; }
           edge = BRepBuilderAPI_MakeEdge(arc.Value());
+          if (!e.ccw) edge.Reverse();
         }
         mw.Add(edge); b.edges.emplace_back(edge, e.source);
       }
