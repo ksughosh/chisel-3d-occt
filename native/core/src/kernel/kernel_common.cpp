@@ -30,7 +30,8 @@ double loopSignedArea(const Loop& loop) {
 
 static const char* roleName(Role r) {
   static const char* n[] = {"Side", "CapStart", "CapEnd", "RevSurface", "RevCapStart", "RevCapEnd", "Seam",
-                              "FilletFace", "ShellInner", "OffsetSide", "SweepSide", "SweepCapStart", "SweepCapEnd", "LoftSide", "LoftCapStart", "LoftCapEnd", "SplitFace", "HealFace"};   // ABI 4 (ADR-040)
+                              "FilletFace", "ShellInner", "OffsetSide", "SweepSide", "SweepCapStart", "SweepCapEnd", "LoftSide", "LoftCapStart", "LoftCapEnd", "SplitFace", "HealFace",   // ABI 4 (ADR-040)
+                              "ThreadFace"};   // ABI 6 (W4 T-C0, spec 23 §4.1)
   const size_t i = static_cast<size_t>(r);
   return i < sizeof n / sizeof n[0] ? n[i] : "Unknown";
 }
