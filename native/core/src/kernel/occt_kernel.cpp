@@ -75,7 +75,7 @@ gp_Dir D(V3 v) { v = glm::normalize(v); return gp_Dir(v.x, v.y, v.z); }
 class OcctKernel : public IGeometryKernel {
  public:
   const char* name() const override { return "occt-8.0.1"; }
-  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; c.transform = true; c.fillet = true; c.shell = true; c.offsetFace = true; c.deleteFace = true; c.stepImport = true; return c; }   /* FR-30: occt_modify.cpp; C8-G8e: occt_step_import.cpp */   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
+  KernelCaps caps() const override { KernelCaps c; c.booleans = true; c.intersect = true; c.exactBrep = true; c.namesThroughBooleans = true; c.copy = true; c.chamfer = true; c.draft = true; c.bend = true; c.stepExport = true; c.transform = true; c.fillet = true; c.shell = true; c.offsetFace = true; c.deleteFace = true; c.stepImport = true; c.thread = true; return c; }   /* FR-30: occt_modify.cpp; C8-G8e: occt_step_import.cpp */   // Intersect shipped in KERN-2 (BRepAlgoAPI_Common); toFace lands with M4-A
 
   struct Built { TopoDS_Face face; std::vector<std::pair<TopoDS_Edge, Uid>> edges; bool ok = false; std::string err; };
 
@@ -445,6 +445,15 @@ class OcctKernel : public IGeometryKernel {
     try { return modifyResult(h, [&](const bevel::Input& in) { return bevel::deleteFaces(in, s, feature, c); }); }
     catch (...) { KernelResult r = fail("These faces cannot be removed cleanly.", "Pick all faces of the feature."); r.status = KernelOpStatus::Invalid; return r; }
   }
+  // W4 T-1 (spec 23 §4, ADR-068): occt_thread.cpp.
+  std::optional<CylFaceInfo> cylinderFace(BodyHandle h, const TopoName& n) override {
+    try { Body* b = get(h); if (!b) return std::nullopt; auto i = b->names.find(n); if (!i) return std::nullopt;
+      return bevel::cylinderInfo(TopoDS::Face(b->faces(*i + 1))); } catch (...) { return std::nullopt; }
+  }
+  KernelResult threadFace(BodyHandle h, const ThreadSpec& s, Uid feature, const OpControl& c) override {
+    try { return modifyResult(h, [&](const bevel::Input& in) { return bevel::thread(in, s, feature, c); }); }
+    catch (...) { KernelResult r = fail("The thread could not be made.", "Try a larger pitch or a shorter thread."); r.status = KernelOpStatus::Invalid; return r; }
+  }
   KernelResult bendBody(BodyHandle h, const BendSpec& s, Uid feature, BendReport* rep) override {   // F3: occt_bend.cpp
     bevel::Input in; { std::lock_guard<std::mutex> lk(m_); auto it = bodies_.find(h.id); if (it == bodies_.end()) return fail("Reference lost: body.", "Pick the body again.");
       in.shape = it->second.shape; in.faces = it->second.faces; in.edges = it->second.edges; in.faceNames = it->second.names.faces; in.edgeNames = it->second.names.edges; }
@@ -495,6 +504,7 @@ class OcctKernel : public IGeometryKernel {
     } catch (const Standard_Failure&) { return bail(StepImportResult::Unreadable, "exception"); }
     catch (...) { return bail(StepImportResult::Unreadable, "exception"); }
   }
+  TopoDS_Shape shapeForTest(BodyHandle h) { Body* b = get(h); return b ? b->shape : TopoDS_Shape(); }   // W4 T-1 test seam (not in the pinned header)
   size_t liveBodyCountForTest() { std::lock_guard<std::mutex> lk(m_); return bodies_.size(); }   // T-STEP-FAIL-NO-LEAK hook (not in the pinned header)
   KernelResult draftFaces(BodyHandle h, const DraftSpec& s, Uid feature) override {
     try { return bevelResult(h, false, nullptr, &s, feature); } catch (...) { return fail("The draft could not be made.", "Try a smaller angle."); }
@@ -535,6 +545,7 @@ class OcctKernel : public IGeometryKernel {
 std::unique_ptr<IGeometryKernel> makeOcctKernel() { return std::make_unique<OcctKernel>(); }
 // C8-G8e test seam (spec 17 G8 8.1 T-STEP-FAIL-NO-LEAK): live kernel bodies of an OCCT kernel, SIZE_MAX for any other kernel. Not in a public header;
 // the host test declares it itself.
+TopoDS_Shape occtShapeForTest(IGeometryKernel& k, BodyHandle h) { auto* o = dynamic_cast<OcctKernel*>(&k); return o ? o->shapeForTest(h) : TopoDS_Shape(); }   // W4 T-1 test seam
 size_t occtLiveBodyCountForTest(IGeometryKernel& k) { auto* o = dynamic_cast<OcctKernel*>(&k); return o ? o->liveBodyCountForTest() : SIZE_MAX; }
 
 }  // namespace chisel

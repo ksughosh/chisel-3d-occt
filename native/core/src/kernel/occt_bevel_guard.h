@@ -2,12 +2,16 @@
 // KERN-5 (ADR-027, G2 spec 4.1b/4.1c): PRIVATE helpers shared by chamferEdges (occt_chamfer.cpp), draftFaces (occt_draft.cpp) and the OCCT adapter.
 // Part of the published LGPL source set. No OCCT type crosses the public header; this header is included only by the adapter's translation units.
 #pragma once
+#include <optional>
 #include <string>
 #include <vector>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Pnt2d.hxx>
 #include "chisel/kernel/geometry_kernel.h"
 
 namespace chisel::bevel {
@@ -56,6 +60,15 @@ Out fillet(const Input& in, const FilletSpec& spec, Uid feature, const OpControl
 Out shell(const Input& in, const ShellSpec& spec, Uid feature, const OpControl& ctl);
 Out offsetFaces(const Input& in, const OffsetFaceSpec& spec, Uid feature, const OpControl& ctl);
 Out deleteFaces(const Input& in, const DeleteFaceSpec& spec, Uid feature, const OpControl& ctl);
+std::optional<CylFaceInfo> cylinderInfo(const TopoDS_Face& f);                       // occt_thread.cpp (W4 T-1, never throws)
+Out thread(const Input& in, const ThreadSpec& spec, Uid feature, const OpControl& ctl);   // occt_thread.cpp (W4 T-1, never throws)
+// W4 T-1 building block (exposed for tests): sweep the closed polygon `rz` ((radius, axial z) in the half-plane u = 0 of `ax`) along a helix of
+// `pitch` on the cylinder of radius rSpine about `ax` for `turns` turns (right hand = counter-clockwise about +ax.Direction() while advancing +z).
+// perTurn: the spine is one edge per turn (last one partial); else one edge. Constant binormal = screw motion. Null shape + *why on failure.
+// The groove profile (spec 23 §4.2 step 4) for a face of radius faceR: closed polygon in (radius, axial) about the helix point; crest guard applied.
+struct ThreadProfile { bool internal = false; double rRoot = 0, wRoot = 0, rCrest = 0, rTop = 0, wHalf = 0, ringIn = 0, ringOut = 0; bool ring = false; std::vector<gp_Pnt2d> poly; };
+ThreadProfile threadProfile(const ThreadSpec& spec, double faceR);
+TopoDS_Shape helixSweep(const gp_Ax3& ax, double rSpine, double pitch, bool leftHand, double turns, const std::vector<gp_Pnt2d>& rz, bool perTurn, std::string* why);
 Uid nameUid(const TopoName& n);   // deterministic FNV-1a id of a face name (the `source` of faces generated from that face, ADR-040)
 
 // Deterministic, platform independent (FNV-1a) id of an edge name; the name of a face made by a chamfer: {feature, Side, edgeUid, tie}.

@@ -15,7 +15,7 @@ namespace chisel {
 enum class BoolOp : uint8_t { NewBody, Join, Cut, Intersect };
 // Role is persisted as its integer and APPEND-ONLY. ABI 4 (ADR-040, KERN-R3-0): values 7..17 belong to the R3 ops; no op emits them until its lane lands.
 enum class Role : uint8_t { Side, CapStart, CapEnd, RevSurface, RevCapStart, RevCapEnd, Seam,
-  FilletFace = 7, ShellInner = 8, OffsetSide = 9, SweepSide = 10, SweepCapStart = 11, SweepCapEnd = 12, LoftSide = 13, LoftCapStart = 14, LoftCapEnd = 15, SplitFace = 16, HealFace = 17 };
+  FilletFace = 7, ShellInner = 8, OffsetSide = 9, SweepSide = 10, SweepCapStart = 11, SweepCapEnd = 12, LoftSide = 13, LoftCapStart = 14, LoftCapEnd = 15, SplitFace = 16, HealFace = 17, ThreadFace = 18 };
 
 struct TopoName {
   Uid feature; Role role = Role::Side; Uid source; uint16_t split = 0;
@@ -63,11 +63,19 @@ struct MassProps { double volumeMm3 = 0; glm::dvec3 centroid{0}; };
 // KERN-5 (ADR-027, ABI 2): `chamfer` and `draft` are separate caps (ADR-023: each op by its own cap, never `exactBrep`). Both are appended at the end.
 struct KernelCaps { bool booleans = false, intersect = false, toFace = false, exactBrep = false, namesThroughBooleans = false, copy = false, chamfer = false, draft = false, bend = false, stepExport = false, transform = false, stepImport = false,
   // ABI 4 (ADR-039/041, KERN-R3-0): one cap per R3 op, all false until the op is implemented (honest defaults); the UI is capability driven.
-  fillet = false, shell = false, offsetFace = false, deleteFace = false, sweep = false, loft = false, split = false, mirror = false, exactMeasure = false, axisQuery = false; };
+  fillet = false, shell = false, offsetFace = false, deleteFace = false, sweep = false, loft = false, split = false, mirror = false, exactMeasure = false, axisQuery = false,
+  // ABI 6 (W4 T-C0, spec 23 §4.1, ADR-068): modelled thread; false until card T-1 implements threadFace.
+  thread = false; };
 
 // KERN-5 (G2 spec 4.1b/4.1c). Equal-distance chamfer of one or more edges. Each edge is named by NameMap::edges of the body (the two adjacent face names
 // plus `tie`, the rank among edges with the same face pair, sorted by edge midpoint). distanceMm >= 1e-3 (kMinChamferMm); every failure is an error, never a silent no-op.
-struct ChamferSpec { std::vector<EdgeName> edges; double distanceMm = 0; };
+// W4 F-C0 (spec 22 §5.1, ADR-070, ABI 5): fields APPENDED; defaults = the ABI-4 equal chamfer (byte-identical behaviour). refFaces.size() is 0 (Equal) or
+// edges.size() (each one of the two faces of that edge: d1 / the angle reference lies on it). Kernels refuse non-Equal modes until card F-3 lands.
+enum class ChamferMode : uint8_t { Equal, TwoDistances, DistanceAngle };
+struct ChamferSpec {
+  std::vector<EdgeName> edges; double distanceMm = 0;
+  ChamferMode mode = ChamferMode::Equal; double distance2Mm = 0; double angleRad = 0; std::vector<TopoName> refFaces;
+};
 // Face draft (taper). Every face in `faces` tilts about the neutral plane (through neutralOrigin, normal = pullDir). angleRad > 0 tilts the faces INWARD (the body
 // loses material), < 0 outward; |angleRad| in [1e-4, 1.5]. The kernel checks that the volume change has the requested sign and reports an error when it has not
 // (e.g. pullDir pointing the wrong way). For a drag-in on a picked edge E between faces Ft (tilting) and Fo: faces = {Ft}, neutralOrigin = a point of E,
@@ -137,6 +145,17 @@ struct LoftSpec { std::vector<Profile2D> sections; std::vector<int> startVertex;
 struct SplitSpec { enum Tool : uint8_t { Plane, Face, Curves } tool = Plane; PlaneFrame plane; TopoName face; std::vector<Profile2D> curves; };
 // FR-33 (spec 19 FR33 3.3): an axis found on a body edge (line direction, circle axis) or face (cylinder / cone axis).
 struct Axis { glm::dvec3 origin{0}, dir{0, 0, 1}; };
+// W4 T-C0 (spec 23 §4.1, ADR-068, ABI 6). A cylindrical face: v0..v1 = axial range along axis.dir (mm, from axis.origin);
+// internal = material outside the radius (hole wall); fullCircle = the u-range covers 2*pi (a split half-cylinder is not threadable).
+struct CylFaceInfo { Axis axis; double radiusMm = 0; double v0 = 0, v1 = 0; bool internal = false; bool fullCircle = false; };
+// One modelled thread cut on `face`. lengthMm 0 = to the far end; startOffsetMm from the start end; helix 0 = per turn, 1 = one edge (T-0 decides).
+struct ThreadSpec {
+  TopoName face; double majorMm = 0, pitchMm = 0, clearanceMm = 0;
+  double startOffsetMm = 0, lengthMm = 0;
+  bool internal = false, leftHand = false, flipStart = false, leadIn = false;
+  uint8_t helix = 0;
+  int maxTurns = 60;
+};
 
 class IGeometryKernel {
  public:
@@ -185,6 +204,9 @@ class IGeometryKernel {
   virtual KernelResult mirrorBody(BodyHandle, const PlaneFrame& /*mirror*/, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
   virtual std::optional<Axis> edgeAxis(BodyHandle, const EdgeName&) { return std::nullopt; }
   virtual std::optional<Axis> faceAxis(BodyHandle, const TopoName&) { return std::nullopt; }
+  // W4 T-C0 (spec 23 §4.1, ABI 6): appended. Defaults = honest "unsupported" until card T-1 (OCCT) / T-4 (selection payload).
+  virtual std::optional<CylFaceInfo> cylinderFace(BodyHandle, const TopoName&) { return std::nullopt; }
+  virtual KernelResult threadFace(BodyHandle, const ThreadSpec&, Uid /*feature*/, const OpControl&) { return unsupportedResult(); }
  protected:
   static KernelResult unsupportedResult() { KernelResult r; r.ok = false; r.error = "not implemented"; r.fix = ""; r.status = KernelOpStatus::Unsupported; return r; }
 };
